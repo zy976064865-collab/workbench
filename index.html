@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="工作台">
+  <meta name="theme-color" content="#0F172A" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#F5F7FA" media="(prefers-color-scheme: light)">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <title>我的工作台</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- 顶部栏 -->
+  <header class="app-header">
+    <div class="header-left">
+      <h1 id="pageTitle">任务</h1>
+      <p id="pageSubtitle" class="page-subtitle"></p>
+    </div>
+    <button id="headerBtn" class="header-btn icon-btn" title="添加" style="display:none">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </header>
+
+  <!-- 主内容区 -->
+  <main id="appMain">
+
+    <!-- ========== 任务视图 ========== -->
+    <section id="view-tasks" class="view active">
+      <!-- 今日概览卡片 -->
+      <div class="today-card" id="todayCard">
+        <div class="today-row">
+          <div class="today-date">
+            <span id="todayWeek" class="today-week">星期日</span>
+            <span id="todayDate" class="today-date-text">8月9日</span>
+          </div>
+          <div class="today-progress-num" id="todayProgressNum">0/0</div>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="todayProgressFill" style="width:0%"></div></div>
+        <p class="today-tip" id="todayTip">今天没有任务,轻松的一天 ☕</p>
+      </div>
+
+      <!-- 筛选 -->
+      <div class="seg seg-tabs" id="taskFilter">
+        <button class="seg-btn active" data-filter="today">今日</button>
+        <button class="seg-btn" data-filter="all">全部</button>
+      </div>
+
+      <!-- 任务列表 -->
+      <div class="task-list" id="taskList"></div>
+      <div class="empty-hint" id="taskEmpty" style="display:none">暂无任务,点右下角 ➕ 添加</div>
+    </section>
+
+    <!-- ========== 日程视图 ========== -->
+    <section id="view-calendar" class="view">
+      <!-- 日历头部 -->
+      <div class="cal-head">
+        <button class="cal-nav icon-btn" id="calPrev" aria-label="上个月">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <div class="cal-title" id="calTitle">2026年8月</div>
+        <button class="cal-nav icon-btn" id="calNext" aria-label="下个月">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+      <!-- 星期头 -->
+      <div class="cal-weekdays">
+        <span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span>
+      </div>
+      <!-- 日期网格 -->
+      <div class="cal-grid" id="calGrid"></div>
+      <!-- 当天事件 -->
+      <div class="day-panel">
+        <div class="day-panel-head">
+          <span class="day-panel-title" id="dayPanelTitle">今天</span>
+          <button class="mini-btn" id="addEventBtn">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            添加日程
+          </button>
+        </div>
+        <div class="day-todo-line" id="dayTodoLine" style="display:none"></div>
+        <div class="event-list" id="eventList"></div>
+        <div class="empty-hint" id="eventEmpty">当天暂无日程</div>
+      </div>
+    </section>
+
+    <!-- ========== 去水印视图 ========== -->
+    <section id="view-watermark" class="view">
+      <!-- 未导入提示 -->
+      <div class="wm-intro" id="wmIntro">
+        <div class="wm-intro-icon">
+          <svg viewBox="0 0 24 24" width="46" height="46" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        </div>
+        <h3>图片去水印</h3>
+        <p class="wm-intro-desc">选择一张图片,框选出水印区域<br>全程在手机本地处理,图片不会上传</p>
+        <button class="primary-btn" id="pickBtn">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+          选择图片
+        </button>
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+      </div>
+
+      <!-- 编辑区 -->
+      <div class="wm-stage-wrap" id="wmStage" style="display:none">
+        <div class="wm-canvas-box">
+          <canvas id="wmCanvas"></canvas>
+          <div class="wm-badge" id="wmBadge"></div>
+        </div>
+
+        <!-- 框选操作 -->
+        <div class="wm-tools">
+          <div class="seg" id="wmModeSeg">
+            <button class="seg-btn active" data-wm="draw">框选区域</button>
+            <button class="seg-btn" data-wm="select">选中区域</button>
+          </div>
+          <div class="wm-tool-row" id="selToolRow" style="display:none">
+            <button class="chip-btn" data-action="inpaint">✨ 智能修复</button>
+            <button class="chip-btn" data-action="blur">🌫 模糊</button>
+            <button class="chip-btn" data-action="deleteSel">🗑 删除选区</button>
+            <button class="chip-btn" data-action="clearSel">✖ 取消</button>
+          </div>
+          <div class="wm-tool-row">
+            <button class="chip-btn" data-action="undo" id="undoBtn" disabled>↩ 撤销</button>
+            <button class="chip-btn" data-action="crop" id="cropBtn">✂ 裁剪选区</button>
+          </div>
+        </div>
+
+        <!-- 导出 -->
+        <div class="wm-export">
+          <button class="primary-btn" id="exportPngBtn">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+            导出 PNG(无损 1:1)
+          </button>
+          <div class="wm-sub-row">
+            <button class="ghost-btn" id="exportJpgBtn">导出 JPG</button>
+            <span class="wm-tip">1:1 原始分辨率 · 不压缩 · 本地处理</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 底部导航 -->
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-view="tasks">
+      <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      <span>任务</span>
+    </button>
+    <button class="tab-btn" data-view="calendar">
+      <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      <span>日程</span>
+    </button>
+    <button class="tab-btn" data-view="watermark">
+      <svg viewBox="0 0 24 24" width="23" height="23" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
+      <span>去水印</span>
+    </button>
+  </nav>
+
+  <!-- 悬浮添加按钮 -->
+  <button id="fab" class="fab">
+    <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+
+  <!-- ========== 任务编辑弹窗 ========== -->
+  <div class="mask" id="taskMask" style="display:none">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title" id="taskSheetTitle">添加任务</div>
+      <div class="sheet-body">
+        <input class="field" id="taskTitle" type="text" placeholder="任务名称" maxlength="60">
+        <div class="field-label">优先级</div>
+        <div class="seg" id="taskPriority">
+          <button class="seg-btn" data-p="high">高</button>
+          <button class="seg-btn active" data-p="medium">中</button>
+          <button class="seg-btn" data-p="low">低</button>
+        </div>
+        <div class="field-label">截止日期</div>
+        <input class="field" id="taskDue" type="date">
+        <div class="field-label">备注(可选)</div>
+        <textarea class="field" id="taskNote" rows="2" placeholder="补充说明…" maxlength="300"></textarea>
+      </div>
+      <div class="sheet-actions">
+        <button class="ghost-btn" id="taskCancel">取消</button>
+        <button class="primary-btn" id="taskSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 日程编辑弹窗 ========== -->
+  <div class="mask" id="eventMask" style="display:none">
+    <div class="sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title" id="eventSheetTitle">添加日程</div>
+      <div class="sheet-body">
+        <input class="field" id="eventTitle" type="text" placeholder="日程标题" maxlength="60">
+        <div class="field-label">日期</div>
+        <input class="field" id="eventDate" type="date">
+        <div class="two-col">
+          <div><div class="field-label">开始</div><input class="field" id="eventStart" type="time"></div>
+          <div><div class="field-label">结束</div><input class="field" id="eventEnd" type="time"></div>
+        </div>
+        <div class="field-label">分类</div>
+        <div class="seg" id="eventCategory">
+          <button class="seg-btn active" data-c="work">💼 工作</button>
+          <button class="seg-btn" data-c="life">🏠 生活</button>
+          <button class="seg-btn" data-c="personal">🧘 个人</button>
+        </div>
+        <div class="field-label">备注(可选)</div>
+        <textarea class="field" id="eventNote" rows="2" placeholder="补充说明…" maxlength="300"></textarea>
+      </div>
+      <div class="sheet-actions">
+        <button class="ghost-btn" id="eventDelete" style="display:none">删除</button>
+        <button class="ghost-btn" id="eventCancel">取消</button>
+        <button class="primary-btn" id="eventSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 结果预览弹窗 ========== -->
+  <div class="mask" id="previewMask" style="display:none">
+    <div class="sheet preview-sheet">
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">处理完成 ✅</div>
+      <div class="preview-img-box"><img id="previewImg" alt="处理结果"></div>
+      <p class="preview-tip">已按 1:1 原始分辨率导出,无压缩。点击下方保存,或<strong>长按图片</strong>保存到相册。</p>
+      <div class="sheet-actions">
+        <button class="primary-btn" id="saveImgBtn">保存图片</button>
+        <button class="ghost-btn" id="previewClose">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 处理中遮罩 -->
+  <div class="mask loading-mask" id="loadingMask" style="display:none">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      <p id="loadingText">正在智能修复…</p>
+      <div class="progress-track"><div class="progress-fill" id="loadingBar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <script src="js/storage.js"></script>
+  <script src="js/tasks.js"></script>
+  <script src="js/calendar.js"></script>
+  <script src="js/watermark.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
