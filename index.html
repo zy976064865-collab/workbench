@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -99,18 +99,24 @@
         </div>
         <h3>图片去水印</h3>
         <p class="wm-intro-desc">选择一张图片,框选出水印区域<br>全程在手机本地处理,图片不会上传</p>
-        <button class="primary-btn" id="pickBtn">
+        <label for="fileInput" class="primary-btn" id="pickBtn">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
           选择图片
-        </button>
-        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        </label>
       </div>
 
       <!-- 编辑区 -->
       <div class="wm-stage-wrap" id="wmStage" style="display:none">
+        <input type="file" id="fileInput" accept="image/*" class="file-input-hidden">
         <div class="wm-canvas-box">
           <canvas id="wmCanvas"></canvas>
           <div class="wm-badge" id="wmBadge"></div>
+        </div>
+
+        <!-- 图片操作(画布上方,随画布可见,无需下滑) -->
+        <div class="wm-file-ops">
+          <label for="fileInput" class="ghost-btn file-label" id="wmChangeBtn">🖼 更换图片</label>
+          <button class="ghost-btn danger" id="wmClearBtn">🗑 清空重选</button>
         </div>
 
         <!-- 框选操作 -->
@@ -141,12 +147,6 @@
             <button class="ghost-btn" id="exportJpgBtn">导出 JPG</button>
             <span class="wm-tip">1:1 原始分辨率 · 不压缩 · 本地处理</span>
           </div>
-        </div>
-
-        <!-- 图片操作 -->
-        <div class="wm-file-ops">
-          <button class="ghost-btn" id="wmChangeBtn">🖼 更换图片</button>
-          <button class="ghost-btn danger" id="wmClearBtn">🗑 清空重选</button>
         </div>
       </div>
     </section>

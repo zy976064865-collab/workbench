@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 去水印模块
  * - 全程本地处理,不上传任何网络
  * - 1:1 原始分辨率输出,PNG 无损导出
@@ -37,11 +37,10 @@ const Watermark = {
   },
 
   bindUI() {
-    document.getElementById('pickBtn').addEventListener('click', () => document.getElementById('fileInput').click());
     document.getElementById('fileInput').addEventListener('change', e => this.loadFile(e.target.files[0]));
 
-    // 编辑区:更换图片 / 清空图片
-    document.getElementById('wmChangeBtn').addEventListener('click', () => document.getElementById('fileInput').click());
+    // 更换图片:label 原生触发文件选择(iOS PWA 最可靠),无需 JS 介入
+    // 清空重选:回到选图首页
     document.getElementById('wmClearBtn').addEventListener('click', () => this.resetAll());
 
     // 模式切换
@@ -558,19 +557,52 @@ const Watermark = {
       if (!inBand[i]) continue;
       inBand[i] = 0;
 
-      // 计算该点颜色:加权平均邻域已知像素(含梯度方向权重)
+      // 计算该点颜色:Telea 梯度感知权重
+      // 标准做法:梯度方向 ∇I,等照度线方向 T=(-∇Iy, ∇Ix),
+      // 权重 = |dir·T| 方向一致性(沿边缘传播) × 距离衰减
       let sumW = 0, sr = 0, sg = 0, sb = 0;
-      const wx = [0.35, 0.35, 0.15, 0.15]; // 左右权重高(横向平滑)
       const ox = [-1, 1, 0, 0], oy = [0, 0, -1, 1];
+      // 计算梯度 ∇I(用四邻域已知像素的亮度差分)
+      let gxr = 0, gyr = 0; // 梯度分量
+      let nKnown = 0;
       for (let k = 0; k < 4; k++) {
         const nx = gx + ox[k], ny = gy + oy[k];
         if (!inB(nx, ny)) continue;
         const ni = idx(nx, ny);
-        if (mask[ni]) continue; // 未填充的未知像素跳过
-        const w = wx[k] / (dist[ni] + 1);
+        if (mask[ni]) continue;
         const pi = (ny * W + nx) * 4;
-        sr += buf[pi] * w; sg += buf[pi + 1] * w; sb += buf[pi + 2] * w;
-        sumW += w;
+        const l = 0.299 * buf[pi] + 0.587 * buf[pi + 1] + 0.114 * buf[pi + 2];
+        gxr += ox[k] * l; gyr += oy[k] * l;
+        nKnown++;
+      }
+      if (nKnown < 2) {
+        // 已知邻居太少,退化为普通距离加权(避免异常)
+        for (let k = 0; k < 4; k++) {
+          const nx = gx + ox[k], ny = gy + oy[k];
+          if (!inB(nx, ny)) continue;
+          const ni = idx(nx, ny);
+          if (mask[ni]) continue;
+          const w = 1 / (dist[ni] + 1);
+          const pi = (ny * W + nx) * 4;
+          sr += buf[pi] * w; sg += buf[pi + 1] * w; sb += buf[pi + 2] * w;
+          sumW += w;
+        }
+      } else {
+        // 等照度线方向 T = (-gyr, gxr),归一化
+        const gLen = Math.sqrt(gxr * gxr + gyr * gyr) || 1;
+        const tx = -gyr / gLen, ty = gxr / gLen;
+        for (let k = 0; k < 4; k++) {
+          const nx = gx + ox[k], ny = gy + oy[k];
+          if (!inB(nx, ny)) continue;
+          const ni = idx(nx, ny);
+          if (mask[ni]) continue;
+          // 方向一致性:|dir·T| 越大(沿边缘)权重越高,平滑传播无阴影
+          const dirDot = (ox[k] * tx + oy[k] * ty);
+          const w = (Math.abs(dirDot) + 0.5) / (dist[ni] + 1);
+          const pi = (ny * W + nx) * 4;
+          sr += buf[pi] * w; sg += buf[pi + 1] * w; sb += buf[pi + 2] * w;
+          sumW += w;
+        }
       }
       if (sumW > 0) {
         const pi = (gy * W + gx) * 4;
@@ -583,7 +615,7 @@ const Watermark = {
         continue;
       }
 
-      // 扩散到四邻域
+      // 扩散到四邻域:更新未填充邻居的距离并加入边界带
       for (const [dx, dy] of neighbors) {
         const nx = gx + dx, ny = gy + dy;
         if (!inB(nx, ny)) continue;
@@ -600,43 +632,82 @@ const Watermark = {
       }
     }
 
-    // 多尺度细节恢复:对修复区域与邻域做 3x3 均值平滑,减少色块感
-    const smooth = new Uint8ClampedArray(bw * bh * 4);
-    for (let j = 1; j < bh - 1; j++) {
-      for (let i = 1; i < bw - 1; i++) {
-        let r = 0, g = 0, b = 0;
-        for (let dj = -1; dj <= 1; dj++) {
-          for (let di = -1; di <= 1; di++) {
-            const p = ((j + dj) * bw + (i + di)) * 4;
-            r += buf[p]; g += buf[p + 1]; b += buf[p + 2];
-          }
-        }
-        const p = (j * bw + i) * 4;
-        smooth[p] = r / 9; smooth[p + 1] = g / 9; smooth[p + 2] = b / 9; smooth[p + 3] = 255;
-      }
-    }
-
-    // 写回主图像:修复区域 + 边缘平滑过渡(选区边缘 6px 内混合,选区外 1:1 保留)
-    const edge = 6;
+    // 写回:先还原选区外的原始像素(1:1),再对修复区域做轻量迭代平滑
+    // 步骤1:把 FMM 结果(buf)直接写回选区(选区外保持原样)
     for (let j = 0; j < bh; j++) {
       for (let i = 0; i < bw; i++) {
         const gx = bx + i, gy = by + j;
         if (gx < x || gx >= x + w || gy < y || gy >= y + h) continue;
         const pi = (gy * W + gx) * 4;
         const si = (j * bw + i) * 4;
-        // 距离选区边缘距离
-        const dEdge = Math.min(gx - x, x + w - 1 - gx, gy - y, y + h - 1 - gy);
-        const t = dEdge < edge ? (edge - dEdge) / edge : 0; // 0=完全平滑, 1=完全不平滑
-        data[pi] = Math.round(buf[si] * (1 - t) + smooth[si] * t);
-        data[pi + 1] = Math.round(buf[si + 1] * (1 - t) + smooth[si + 1] * t);
-        data[pi + 2] = Math.round(buf[si + 2] * (1 - t) + smooth[si + 2] * t);
+        data[pi] = buf[si]; data[pi + 1] = buf[si + 1]; data[pi + 2] = buf[si + 2];
         data[pi + 3] = 255;
+      }
+    }
+
+    // 步骤2:对修复区域做 2 次 3x3 均值平滑(仅选区内,消除残留颗粒/条纹)
+    const inSel = (gx, gy) => gx >= x && gx < x + w && gy >= y && gy < y + h;
+    const w2 = new Uint8ClampedArray(bw * bh * 4);
+    for (let pass = 0; pass < 2; pass++) {
+      for (let j = 1; j < bh - 1; j++) {
+        for (let i = 1; i < bw - 1; i++) {
+          const gx = bx + i, gy = by + j;
+          if (!inSel(gx, gy)) continue;
+          const p = (j * bw + i) * 4;
+          let r = 0, g = 0, b = 0, n = 0;
+          for (let dj = -1; dj <= 1; dj++) {
+            for (let di = -1; di <= 1; di++) {
+              const n2 = ((j + dj) * bw + (i + di)) * 4;
+              r += buf[n2]; g += buf[n2 + 1]; b += buf[n2 + 2]; n++;
+            }
+          }
+          if (n) { w2[p] = r / n; w2[p + 1] = g / n; w2[p + 2] = b / n; w2[p + 3] = 255; }
+        }
+      }
+      buf.set(w2);
+    }
+
+    // 步骤3:把平滑结果写回选区(仅选区内)
+    for (let j = 0; j < bh; j++) {
+      for (let i = 0; i < bw; i++) {
+        const gx = bx + i, gy = by + j;
+        if (!inSel(gx, gy)) continue;
+        const pi = (gy * W + gx) * 4;
+        const si = (j * bw + i) * 4;
+        data[pi] = buf[si]; data[pi + 1] = buf[si + 1]; data[pi + 2] = buf[si + 2];
+      }
+    }
+
+    // 步骤4:边缘羽化 - 修复区最外 2px 与选区外背景线性混合,消除暗边
+    // 对每个修复区边缘像素,取选区外最近已知像素做混合,避免边缘色差突兀
+    const feather = 2;
+    for (let j = 0; j < bh; j++) {
+      for (let i = 0; i < bw; i++) {
+        const gx = bx + i, gy = by + j;
+        if (!inSel(gx, gy)) continue;
+        // 到选区边缘的距离
+        const dEdge = Math.min(gx - x, x + w - 1 - gx, gy - y, y + h - 1 - gy);
+        if (dEdge >= feather) continue;
+        const t = dEdge / feather; // 0=最边缘, 1=内部
+        // 找选区外最近已知像素(沿最靠近的边缘方向向外 1px)
+        let bx2 = gx, by2 = gy;
+        if (gx - x < feather) bx2 = gx - 1;
+        else if (x + w - 1 - gx < feather) bx2 = gx + 1;
+        if (gy - y < feather) by2 = gy - 1;
+        else if (y + h - 1 - gy < feather) by2 = gy + 1;
+        bx2 = Math.max(0, Math.min(W - 1, bx2));
+        by2 = Math.max(0, Math.min(H - 1, by2));
+        if (inSel(bx2, by2)) continue;
+        const pi = (gy * W + gx) * 4;
+        const ri = (by2 * W + bx2) * 4;
+        data[pi] = Math.round(data[pi] * t + data[ri] * (1 - t));
+        data[pi + 1] = Math.round(data[pi + 1] * t + data[ri + 1] * (1 - t));
+        data[pi + 2] = Math.round(data[pi + 2] * t + data[ri + 2] * (1 - t));
       }
     }
 
     this.offCtx.putImageData(src, 0, 0);
   },
-
   /**
    * 高斯模糊选区(分块异步执行,避免大图卡死)
    * 用 1/4 分辨率中间层做快速高斯近似,兼顾速度与效果
