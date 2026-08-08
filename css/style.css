@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    我的工作台 · 全局样式
    iPhone PWA 适配 + 深色模式
    ============================================================ */
@@ -259,20 +259,69 @@ main { padding: 12px 14px 24px; }
 }
 .primary-btn:active { transform: scale(0.97); }
 .primary-btn:disabled { opacity: 0.5; }
-
 .wm-stage-wrap { padding-bottom: 10px; }
-.wm-canvas-box {
-  position: relative; border-radius: var(--radius); overflow: hidden;
+
+/* 画布容器:固定高度,图片等比适配,可滚动查看 */
+.wm-canvas-wrap {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%;
+  height: min(46vh, 420px);
+  border-radius: var(--radius);
   background: repeating-conic-gradient(#1a1a1a 0 25%, #262626 0 50%) 50% / 20px 20px;
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
-#wmCanvas { display: block; width: 100%; height: auto; touch-action: none; }
+
+/* 画布:尺寸由 JS 精确计算(位图等比缩放),flex 居中,不依赖 object-fit */
+#wmCanvas {
+  display: block;
+  flex: none; /* 防止 flex 压缩画布 */
+  touch-action: pan-y; /* 默认可上下滚动页面 */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* 框选模式下:拦截触摸用于画框 */
+#wmCanvas.wm-drawing { touch-action: none; }
+
 .wm-badge {
-  position: absolute; top: 10px; left: 10px;
+  position: absolute; top: 10px; left: 10px; z-index: 2;
   background: rgba(0,0,0,0.65); color: #fff; font-size: 11.5px;
   padding: 4px 10px; border-radius: 99px; backdrop-filter: blur(4px);
+  pointer-events: none;
 }
-.wm-tools { margin-top: 14px; }
+
+/* 画布内提示(放大/缩放说明) */
+.wm-canvas-hint {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 2;
+  background: rgba(0,0,0,0.55); color: #fff; font-size: 11px;
+  padding: 4px 12px; border-radius: 99px; pointer-events: none;
+  white-space: nowrap;
+}
+
+/* 顶部操作条:更换图片 / 清空 / 模式开关 */
+.wm-topbar {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+}
+.wm-topbar .wm-file-ops { display: flex; gap: 8px; flex: 1; }
+.wm-topbar .wm-file-ops .ghost-btn { flex: 1; }
+
+.wm-mode-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 11px; padding: 9px 14px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all 0.18s; white-space: nowrap;
+  flex: none;
+}
+.wm-mode-btn.active {
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  color: #fff; border-color: transparent;
+}
+
+/* 工具区(画布下方,始终可见) */
+.wm-tools { margin-top: 12px; }
 .wm-tool-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .chip-btn {
   flex: 1; min-width: 90px; border: 1px solid var(--line);
@@ -282,9 +331,10 @@ main { padding: 12px 14px 24px; }
 }
 .chip-btn:active { background: var(--primary-soft); }
 .chip-btn:disabled { opacity: 0.4; }
-.wm-export { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.wm-export { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
 .wm-export .primary-btn { width: 100%; }
 .wm-sub-row { display: flex; align-items: center; gap: 12px; width: 100%; justify-content: center; flex-wrap: wrap; }
+
 .ghost-btn {
   border: 1px solid var(--line); background: var(--card); color: var(--text);
   border-radius: 11px; padding: 9px 16px; font-size: 14px; font-weight: 500;
@@ -292,22 +342,13 @@ main { padding: 12px 14px 24px; }
 }
 .ghost-btn:active { background: var(--card-2); }
 .ghost-btn.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, transparent); }
-.wm-tip { font-size: 11.5px; color: var(--text-3); }
-
-/* 图片操作:更换/清空 */
-.wm-file-ops {
-  display: flex; gap: 10px; margin-top: 14px;
-}
-.wm-file-ops .ghost-btn { flex: 1; }
-
-/* label 模拟按钮:与 button 完全一致,并保持原生文件选择能力 */
+/* label 模拟按钮:与 button 完全一致 */
 .file-label {
   display: inline-flex; align-items: center; justify-content: center;
   text-align: center; cursor: pointer; user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
 .file-label:active { background: var(--card-2); }
-.wm-file-ops { margin-top: 10px; }
 
 /* 隐藏文件输入:视觉隐藏但保留可点击性(iOS label 触发必需) */
 .file-input-hidden {

@@ -39,19 +39,11 @@ const Watermark = {
   bindUI() {
     document.getElementById('fileInput').addEventListener('change', e => this.loadFile(e.target.files[0]));
 
-    // 更换图片:label 原生触发文件选择(iOS PWA 最可靠),无需 JS 介入
     // 清空重选:回到选图首页
     document.getElementById('wmClearBtn').addEventListener('click', () => this.resetAll());
 
-    // 模式切换
-    document.querySelectorAll('#wmModeSeg .seg-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('#wmModeSeg .seg-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.tool = btn.dataset.wm;
-        this.updateToolUI();
-      });
-    });
+    // 框选开关:点击进入/退出框选模式
+    document.getElementById('wmDrawBtn').addEventListener('click', () => this.toggleDrawMode());
 
     // 选区操作
     document.querySelectorAll('.chip-btn[data-action]').forEach(btn => {
@@ -71,8 +63,7 @@ const Watermark = {
       if (e.target === e.currentTarget) document.getElementById('previewMask').style.display = 'none';
     });
 
-    // 画布指针事件(框选/点击)
-    // iOS Safari 13 以下不支持 PointerEvent,退化为 Touch + Mouse 事件
+    // 画布指针事件:框选模式下拦截触摸,浏览模式让页面滚动
     if (window.PointerEvent) {
       this.canvas.addEventListener('pointerdown', e => this.onDown(e));
       this.canvas.addEventListener('pointermove', e => this.onMove(e));
@@ -88,9 +79,27 @@ const Watermark = {
     }
   },
 
+  /** 框选模式开关 */
+  toggleDrawMode() {
+    if (this._processing) return;
+    this.tool = (this.tool === 'draw') ? 'browse' : 'draw';
+    if (this.tool !== 'draw') { this.dragging = null; this.drawing = false; }
+    this.updateToolUI();
+  },
+
   updateToolUI() {
-    const isSelect = this.tool === 'select';
-    document.getElementById('selToolRow').style.display = isSelect ? 'flex' : 'none';
+    const isDraw = this.tool === 'draw';
+    const btn = document.getElementById('wmDrawBtn');
+    if (btn) {
+      btn.classList.toggle('active', isDraw);
+      btn.textContent = isDraw ? '✅ 完成框选' : '✏️ 框选';
+    }
+    this.canvas.classList.toggle('wm-drawing', isDraw);
+    if (!isDraw) { this.dragging = null; this.drawing = false; }
+    const hint = document.getElementById('wmCanvasHint');
+    if (hint) hint.textContent = isDraw ? '按住图片拖动,框选水印区域' : '上下滑动可滚动页面 · 点「框选」开始框选';
+    const hasSel = this.rects.length > 0 && this.selIndex >= 0;
+    document.getElementById('selToolRow').style.display = hasSel ? 'flex' : 'none';
     if (this.selIndex < 0 || this.selIndex >= this.rects.length) this.selIndex = -1;
     this.redraw();
   },
@@ -128,11 +137,13 @@ const Watermark = {
     this.rects = [];
     this.selIndex = -1;
     this.history = [];
-    this.tool = 'draw';
-    document.querySelectorAll('#wmModeSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.wm === 'draw'));
-    document.getElementById('selToolRow').style.display = 'none';
-    document.getElementById('undoBtn').disabled = true;
+    this.tool = 'browse'; // 默认浏览模式,可滚动页面
+    const db = document.getElementById('wmDrawBtn');
+    if (db) { db.classList.remove('active'); db.textContent = '✏️ 框选'; }
+    this.canvas.classList.remove('wm-drawing');
     document.getElementById('cropBtn').disabled = false;
+    document.getElementById('undoBtn').disabled = true;
+    document.getElementById('selToolRow').style.display = 'none';
 
     document.getElementById('wmIntro').style.display = 'none';
     document.getElementById('wmStage').style.display = 'block';
@@ -164,19 +175,27 @@ const Watermark = {
   },
 
   layoutCanvas() {
-    // 让显示画布适配屏幕宽度,内部仍为原始分辨率
-    const box = document.querySelector('.wm-canvas-box');
-    const maxW = box.clientWidth || (window.innerWidth - 28);
-    const scale = Math.min(1, maxW / this.offCanvas.width);
-    this.dispScale = scale;
+    // 画布内部分辨率 = 图像原始分辨率
     this.canvas.width = this.offCanvas.width;
     this.canvas.height = this.offCanvas.height;
-    this.canvas.style.width = `${this.offCanvas.width * scale}px`;
-    this.canvas.style.height = `${this.offCanvas.height * scale}px`;
+    // 显示尺寸:按容器等比缩放,canvas CSS 尺寸精确 = 位图显示尺寸
+    const wrap = document.querySelector('.wm-canvas-wrap');
+    const boxW = (wrap && wrap.clientWidth) || (window.innerWidth - 28);
+    const boxH = (wrap && wrap.clientHeight) || 380;
+    this.dispScale = Math.min(boxW / this.offCanvas.width, boxH / this.offCanvas.height);
+    const dw = Math.max(1, Math.round(this.offCanvas.width * this.dispScale));
+    const dh = Math.max(1, Math.round(this.offCanvas.height * this.dispScale));
+    // 容器内居中偏移(留白区域),坐标映射时使用
+    this.dispOffsetX = Math.round((boxW - dw) / 2);
+    this.dispOffsetY = Math.round((boxH - dh) / 2);
+    // 关键:canvas CSS 尺寸 = 位图显示尺寸,flex 容器居中,不依赖 object-fit
+    this.canvas.style.width = dw + 'px';
+    this.canvas.style.height = dh + 'px';
   },
 
   /** 屏幕坐标 -> 图像坐标 */
   toImageCoord(x, y) {
+    // canvas CSS 尺寸 = 位图显示尺寸,getBoundingClientRect 左上角即位图左上角
     const r = this.canvas.getBoundingClientRect();
     const ix = (x - r.left) / this.dispScale;
     const iy = (y - r.top) / this.dispScale;
@@ -192,11 +211,13 @@ const Watermark = {
     return { x: t.clientX, y: t.clientY };
   },
   onTouchStart(e) {
+    if (this.tool !== 'draw') return; // 浏览模式不拦截,页面可滚动
     e.preventDefault();
     const { x, y } = this.touchToXY(e);
     this.onDownXY(x, y);
   },
   onTouchMove(e) {
+    if (this.tool !== 'draw') return;
     e.preventDefault();
     if (this.drawing) {
       const { x, y } = this.touchToXY(e);
@@ -204,12 +225,14 @@ const Watermark = {
     }
   },
   onTouchEnd(e) {
+    if (this.tool !== 'draw') return;
     e.preventDefault();
     if (this.drawing) this.onUpXY();
   },
 
   onDown(e) {
     if (!this.image) return;
+    if (this.tool !== 'draw') return; // 浏览模式不拦截
     e.preventDefault();
     try { this.canvas.setPointerCapture(e.pointerId); } catch (err) {}
     this.pointerId = e.pointerId;
@@ -219,26 +242,15 @@ const Watermark = {
   /** 统一的按下处理:进入框选或选择模式 */
   onDownXY(cx, cy) {
     if (!this.image || this._processing) return;
+    if (this.tool !== 'draw') return;
     const p = this.toImageCoord(cx, cy);
-    if (this.tool === 'draw') {
-      this.dragging = { sx: p.x, sy: p.y, cx: p.x, cy: p.y };
-      this.drawing = true;
-    } else {
-      // 选择模式:点击选中已有区域
-      this.drawing = false;
-      let found = -1;
-      // 从后往前找(最上层)
-      for (let i = this.rects.length - 1; i >= 0; i--) {
-        const r = this.rects[i];
-        if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) { found = i; break; }
-      }
-      this.selIndex = found;
-      this.redraw();
-    }
+    this.dragging = { sx: p.x, sy: p.y, cx: p.x, cy: p.y };
+    this.drawing = true;
   },
 
   onMove(e) {
     if (!this.image) return;
+    if (this.tool !== 'draw') return;
     e.preventDefault();
     if (this.drawing && this.dragging) this.onMoveXY(e.clientX, e.clientY);
   },
@@ -252,6 +264,7 @@ const Watermark = {
 
   onUp(e) {
     if (!this.image) return;
+    if (this.tool !== 'draw') return;
     e.preventDefault();
     if (this.drawing) this.onUpXY();
     try { this.canvas.releasePointerCapture(e.pointerId); } catch (err) {}
@@ -265,9 +278,10 @@ const Watermark = {
     if (w > 4 && h > 4) {
       this.rects.push({ x, y, w, h });
       this.selIndex = this.rects.length - 1;
-      this.tool = 'select';
-      document.querySelectorAll('#wmModeSeg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.wm === 'select'));
+      // 框选完成:自动退出框选模式,恢复页面滚动
+      this.tool = 'browse';
       this.updateToolUI();
+      Toast.show('已框选区域,可点下方按钮处理');
     }
     this.dragging = null;
     this.drawing = false;
@@ -352,10 +366,9 @@ const Watermark = {
   inpaintSelected() {
     const r = this.getSelectedRect();
     if (!r) { Toast.show('请先框选水印区域'); return; }
-    if (this.tool !== 'select') {
-      // 若还在绘制模式,自动切到 select
-      this.selIndex = this.rects.length - 1;
-      this.tool = 'select';
+    if (this.tool === 'draw') {
+      // 若还在框选模式,自动退出
+      this.tool = 'browse';
       this.updateToolUI();
     }
     const area = r.w * r.h;
@@ -373,6 +386,7 @@ const Watermark = {
           this.inpaintRect(r);
           this.rects = this.rects.filter((_, i) => i !== this.selIndex);
           this.selIndex = -1;
+          this.updateToolUI();
           this.redraw();
           this.hideLoading();
           this._processing = false;
@@ -401,6 +415,7 @@ const Watermark = {
           this.blurRectAsync(r, radius, () => {
             this.rects = this.rects.filter((_, i) => i !== this.selIndex);
             this.selIndex = -1;
+            this.updateToolUI();
             this.redraw();
             this.hideLoading();
             this._processing = false;
@@ -422,7 +437,7 @@ const Watermark = {
     if (!r) { Toast.show('请先框选水印区域'); return; }
     this.rects = this.rects.filter((_, i) => i !== this.selIndex);
     this.selIndex = -1;
-    this.redraw();
+    this.updateToolUI();
     Toast.show('已删除该选区');
   },
 

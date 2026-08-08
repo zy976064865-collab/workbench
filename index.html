@@ -108,32 +108,34 @@
       <!-- 编辑区 -->
       <div class="wm-stage-wrap" id="wmStage" style="display:none">
         <input type="file" id="fileInput" accept="image/*" class="file-input-hidden">
-        <div class="wm-canvas-box">
+
+        <!-- 顶部操作条:更换/清空 + 框选开关(始终可见) -->
+        <div class="wm-topbar">
+          <div class="wm-file-ops">
+            <label for="fileInput" class="ghost-btn file-label" id="wmChangeBtn">🖼 更换图片</label>
+            <button class="ghost-btn danger" id="wmClearBtn">🗑 清空</button>
+          </div>
+          <button class="wm-mode-btn" id="wmDrawBtn">✏️ 框选</button>
+        </div>
+
+        <!-- 画布:固定高度,图片等比适配,默认可滚动页面 -->
+        <div class="wm-canvas-wrap">
           <canvas id="wmCanvas"></canvas>
           <div class="wm-badge" id="wmBadge"></div>
+          <div class="wm-canvas-hint" id="wmCanvasHint">在图片上滑动可上下滚动页面</div>
         </div>
 
-        <!-- 图片操作(画布上方,随画布可见,无需下滑) -->
-        <div class="wm-file-ops">
-          <label for="fileInput" class="ghost-btn file-label" id="wmChangeBtn">🖼 更换图片</label>
-          <button class="ghost-btn danger" id="wmClearBtn">🗑 清空重选</button>
-        </div>
-
-        <!-- 框选操作 -->
+        <!-- 选区操作(框选后显示) -->
         <div class="wm-tools">
-          <div class="seg" id="wmModeSeg">
-            <button class="seg-btn active" data-wm="draw">框选区域</button>
-            <button class="seg-btn" data-wm="select">选中区域</button>
-          </div>
           <div class="wm-tool-row" id="selToolRow" style="display:none">
             <button class="chip-btn" data-action="inpaint">✨ 智能修复</button>
             <button class="chip-btn" data-action="blur">🌫 模糊</button>
-            <button class="chip-btn" data-action="deleteSel">🗑 删除选区</button>
+            <button class="chip-btn" data-action="deleteSel">🗑 删除</button>
             <button class="chip-btn" data-action="clearSel">✖ 取消</button>
           </div>
           <div class="wm-tool-row">
             <button class="chip-btn" data-action="undo" id="undoBtn" disabled>↩ 撤销</button>
-            <button class="chip-btn" data-action="crop" id="cropBtn">✂ 裁剪选区</button>
+            <button class="chip-btn" data-action="crop" id="cropBtn">✂ 裁剪</button>
           </div>
         </div>
 
