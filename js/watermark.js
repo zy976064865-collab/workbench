@@ -96,11 +96,6 @@ const Watermark = {
     }
     this.canvas.classList.toggle('wm-drawing', isDraw);
     if (!isDraw) { this.dragging = null; this.drawing = false; }
-    const hint = document.getElementById('wmCanvasHint');
-    if (hint) {
-      if (isDraw) { hint.textContent = '按住图片拖动,框选水印区域'; hint.classList.add('show'); }
-      else { hint.classList.remove('show'); }
-    }
     const hasSel = this.rects.length > 0 && this.selIndex >= 0;
     document.getElementById('selToolRow').style.display = hasSel ? 'flex' : 'none';
     if (this.selIndex < 0 || this.selIndex >= this.rects.length) this.selIndex = -1;
@@ -127,12 +122,10 @@ const Watermark = {
     // 超大图:等比降采样到单边 ≤4096,否则 iPhone 内存会爆
     let w = img.naturalWidth, h = img.naturalHeight;
     const maxSide = this.MAX_PIXELS;
-    let scaled = false;
     if (w > maxSide || h > maxSide) {
       const s = Math.min(1, maxSide / Math.max(w, h));
       w = Math.max(1, Math.round(w * s));
       h = Math.max(1, Math.round(h * s));
-      scaled = true;
     }
     this.offCanvas.width = w;
     this.offCanvas.height = h;
@@ -150,20 +143,10 @@ const Watermark = {
 
     document.getElementById('wmIntro').style.display = 'none';
     document.getElementById('wmStage').style.display = 'block';
-    document.getElementById('wmBadge').textContent =
-      `${w} × ${h}${scaled ? ` · 已优化至 ${maxSide}px 内` : ' · 原始分辨率'}`;
 
     // 计算显示缩放
     this.layoutCanvas();
     this.redraw();
-    // 首次上传:短暂显示操作引导,3秒后自动消失,不常驻
-    const hint = document.getElementById('wmCanvasHint');
-    if (hint) {
-      hint.textContent = '上下滑动可滚动页面 · 点「框选」开始框选';
-      hint.classList.add('show');
-      clearTimeout(this._hintTimer);
-      this._hintTimer = setTimeout(() => hint.classList.remove('show'), 3000);
-    }
   },
 
   /** 清空并回到选图首页 */
@@ -180,9 +163,6 @@ const Watermark = {
     this.drawing = false;
     this._processing = false;
     clearInterval(this._barTimer);
-    clearTimeout(this._hintTimer);
-    const hintEl = document.getElementById('wmCanvasHint');
-    if (hintEl) hintEl.classList.remove('show');
     document.getElementById('loadingMask').style.display = 'none';
     document.getElementById('wmIntro').style.display = 'block';
     document.getElementById('wmStage').style.display = 'none';
