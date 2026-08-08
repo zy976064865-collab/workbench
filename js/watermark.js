@@ -501,7 +501,7 @@ const Watermark = {
 
     // 初始化边界带:掩码内且邻接已知像素
     const isKnown = (gx, gy) => !mask[idx(gx, gy)];
-    const neighbors = [[-1,0],[1,0],[0,-1],[0,1]];
+    const neighbors = [[-1,0,1],[1,0,1],[0,-1,1],[0,1,1],[-1,-1,Math.SQRT2],[1,-1,Math.SQRT2],[-1,1,Math.SQRT2],[1,1,Math.SQRT2]];
     for (let gy = by; gy < by + bh; gy++) {
       for (let gx = bx; gx < bx + bw; gx++) {
         if (!mask[idx(gx, gy)]) continue;
@@ -570,7 +570,7 @@ const Watermark = {
       // 标准做法:梯度方向 ∇I,等照度线方向 T=(-∇Iy, ∇Ix),
       // 权重 = |dir·T| 方向一致性(沿边缘传播) × 距离衰减
       let sumW = 0, sr = 0, sg = 0, sb = 0;
-      const ox = [-1, 1, 0, 0], oy = [0, 0, -1, 1];
+      const ox = [-1, 1, 0, 0, -1, 1, -1, 1], oy = [0, 0, -1, 1, -1, -1, 1, 1];
       // 计算梯度 ∇I(用四邻域已知像素的亮度差分)
       let gxr = 0, gyr = 0; // 梯度分量
       let nKnown = 0;
@@ -625,12 +625,12 @@ const Watermark = {
       }
 
       // 扩散到四邻域:更新未填充邻居的距离并加入边界带
-      for (const [dx, dy] of neighbors) {
+      for (const [dx, dy, dd] of neighbors) {
         const nx = gx + dx, ny = gy + dy;
         if (!inB(nx, ny)) continue;
         const ni = idx(nx, ny);
         if (!mask[ni]) continue;
-        const nd = dist[i] + 1;
+        const nd = dist[i] + dd;
         if (nd < dist[ni]) {
           dist[ni] = nd;
           if (!inBand[ni]) {
@@ -656,8 +656,10 @@ const Watermark = {
 
     // 步骤2:对修复区域做 2 次 3x3 均值平滑(仅选区内,消除残留颗粒/条纹)
     const inSel = (gx, gy) => gx >= x && gx < x + w && gy >= y && gy < y + h;
-    const w2 = new Uint8ClampedArray(bw * bh * 4);
     for (let pass = 0; pass < 2; pass++) {
+      // 关键修复:每遍从当前 buf 拷贝 w2,选区外像素保持原值,
+      // 避免选区外被置 0(黑色)污染选区边缘产生暗边阴影
+      const w2 = new Uint8ClampedArray(buf);
       for (let j = 1; j < bh - 1; j++) {
         for (let i = 1; i < bw - 1; i++) {
           const gx = bx + i, gy = by + j;
@@ -689,7 +691,7 @@ const Watermark = {
 
     // 步骤4:边缘羽化 - 修复区最外 2px 与选区外背景线性混合,消除暗边
     // 对每个修复区边缘像素,取选区外最近已知像素做混合,避免边缘色差突兀
-    const feather = 2;
+    const feather = 3;
     for (let j = 0; j < bh; j++) {
       for (let i = 0; i < bw; i++) {
         const gx = bx + i, gy = by + j;
