@@ -299,7 +299,9 @@ main { padding: 12px 14px 24px; }
   background: rgba(0,0,0,0.55); color: #fff; font-size: 11px;
   padding: 4px 12px; border-radius: 99px; pointer-events: none;
   white-space: nowrap;
+  opacity: 0; transition: opacity 0.35s ease;
 }
+.wm-canvas-hint.show { opacity: 1; }
 
 /* 顶部操作条:更换图片 / 清空 / 模式开关 */
 .wm-topbar {

@@ -97,7 +97,10 @@ const Watermark = {
     this.canvas.classList.toggle('wm-drawing', isDraw);
     if (!isDraw) { this.dragging = null; this.drawing = false; }
     const hint = document.getElementById('wmCanvasHint');
-    if (hint) hint.textContent = isDraw ? '按住图片拖动,框选水印区域' : '上下滑动可滚动页面 · 点「框选」开始框选';
+    if (hint) {
+      if (isDraw) { hint.textContent = '按住图片拖动,框选水印区域'; hint.classList.add('show'); }
+      else { hint.classList.remove('show'); }
+    }
     const hasSel = this.rects.length > 0 && this.selIndex >= 0;
     document.getElementById('selToolRow').style.display = hasSel ? 'flex' : 'none';
     if (this.selIndex < 0 || this.selIndex >= this.rects.length) this.selIndex = -1;
@@ -153,6 +156,14 @@ const Watermark = {
     // 计算显示缩放
     this.layoutCanvas();
     this.redraw();
+    // 首次上传:短暂显示操作引导,3秒后自动消失,不常驻
+    const hint = document.getElementById('wmCanvasHint');
+    if (hint) {
+      hint.textContent = '上下滑动可滚动页面 · 点「框选」开始框选';
+      hint.classList.add('show');
+      clearTimeout(this._hintTimer);
+      this._hintTimer = setTimeout(() => hint.classList.remove('show'), 3000);
+    }
   },
 
   /** 清空并回到选图首页 */
@@ -169,6 +180,9 @@ const Watermark = {
     this.drawing = false;
     this._processing = false;
     clearInterval(this._barTimer);
+    clearTimeout(this._hintTimer);
+    const hintEl = document.getElementById('wmCanvasHint');
+    if (hintEl) hintEl.classList.remove('show');
     document.getElementById('loadingMask').style.display = 'none';
     document.getElementById('wmIntro').style.display = 'block';
     document.getElementById('wmStage').style.display = 'none';
