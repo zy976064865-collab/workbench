@@ -493,6 +493,8 @@ const Watermark = {
   findSourcePatch(data, W, H, r) {
     const { x, y, w, h } = r;
     if (w < 2 || h < 2 || w > W * 0.7 || h > H * 0.7) return null;
+    // 大选区(人像/复杂纹理常见):跳过"平滑判定直接回退插值",避免把丰富纹理误判为平滑色块
+    const isLarge = (w > 40 && h > 40) || (w * h > 3000);
 
     // 纹理门控:用"去除线性趋势后的残差"判断边缘带是否为真纹理。
     // 平滑渐变(线性趋势主导)走边界插值更自然;残差大(高频纹理)才用 patch 复制。
@@ -538,12 +540,12 @@ const Watermark = {
       if (x > 0) sample(x - 1, y, 0, 1, h);
       if (x + w < W) sample(x + w, y, 0, 1, h);
       // 残差占比 < 45% 视为平滑(线性趋势主导),走边界插值
-      if (cnt && total > 0 && (resid / total) < 0.45) return null;
+      if (cnt && total > 0 && (resid / total) < 0.25) return null;
     }
 // 亮度带门控:候选块边缘带平均亮度必须与选区接近(≤ 35),否则其内部
     // 渐变/光照位置不同,单一颜色偏移无法校正,复制会造成亮度断层。
     // 由 scoreAt 在计算颜色偏移时同步评估并拒绝跨亮度带候选。
-    const lumOffMax = 35;
+    const lumOffMax = isLarge ? 90 : 60;
 
     const maxCandidates = 6000;
     const radius = Math.max(160, Math.min(Math.max(w, h) * 5, Math.max(W, H)));
@@ -770,6 +772,53 @@ const Watermark = {
     if (ok < 10) return false;
 
     // 写入 + 边缘羽化(与选区外最近真实像素混合,消除接缝)
+
+    // 纹理增强:叠加边缘带的高频细节(沿每条边投影位置的残差),让修复区中心
+    // 保留真实照片的纹理起伏,避免整块平滑色块;只加高频成分,不改低频渐变基线。
+    const det = new Float32Array(w * h * 3);
+    {
+      const bands2 = this._edgeBands(src, W, H, r); // 2px 带(含离群点邻域替换)
+      // 每条边的高频残差 = 带内颜色 - 该带均值(去低频)
+      const hi = (arr) => {
+        if (!arr || arr.length < 4) return null;
+        let mr = 0, mg = 0, mb = 0;
+        for (const v of arr) { mr += v[0]; mg += v[1]; mb += v[2]; }
+        const n = arr.length;
+        mr /= n; mg /= n; mb /= n;
+        return arr.map(v => [v[0] - mr, v[1] - mg, v[2] - mb]);
+      };
+      const hTop = hi(bands2.top), hBot = hi(bands2.bottom);
+      const hLef = hi(bands2.left), hRig = hi(bands2.right);
+      for (let j = 0; j < h; j++) {
+        const cy = y + j;
+        const dTop = hTop ? cy - (y - 1) : -1;
+        const dBot = hBot ? (y + h) - cy : -1;
+        for (let i = 0; i < w; i++) {
+          const cx = x + i;
+          const dLef = hLef ? cx - (x - 1) : -1;
+          const dRig = hRig ? (x + w) - cx : -1;
+          let dr = 0, dg = 0, db = 0, dw = 0;
+          const push = (h, k, ww) => {
+            if (!h) return;
+            const v = h[Math.min(Math.max(0, k), h.length - 1)];
+            dr += v[0] * ww; dg += v[1] * ww; db += v[2] * ww; dw += ww;
+          };
+          push(hTop, i, dTop >= 0 ? 1 / (dTop * dTop + 1) : 0);
+          push(hBot, i, dBot >= 0 ? 1 / (dBot * dBot + 1) : 0);
+          push(hLef, j, dLef >= 0 ? 1 / (dLef * dLef + 1) : 0);
+          push(hRig, j, dRig >= 0 ? 1 / (dRig * dRig + 1) : 0);
+          if (dw > 0) {
+            const q = (j * w + i) * 3;
+            // 高频残差按距离加权混合;中心区信任度略降
+            const fade = Math.max(0.35, 1 - (Math.min(i, w - 1 - i, j, h - 1 - j)) / Math.max(8, w + h) * 1.6);
+            det[q] = (dr / dw) * fade;
+            det[q + 1] = (dg / dw) * fade;
+            det[q + 2] = (db / dw) * fade;
+          }
+        }
+      }
+    }
+
     const feather = 2;
     for (let j = 0; j < h; j++) {
       const cy = y + j;
@@ -781,6 +830,8 @@ const Watermark = {
         t = t * t * (3 - 2 * t);
         const q = (j * w + i) * 3;
         let rv = pre[q], gv = pre[q + 1], bv = pre[q + 2];
+        // 叠加边缘带纹理抖动(羽化区内按 t 衰减,边缘处完全贴合真实像素)
+        rv += det[q] * t; gv += det[q + 1] * t; bv += det[q + 2] * t;
         if (t < 1) {
           // 羽化混合:取选区外该像素沿"最近边缘"方向 1px 的真实背景色(读 src)
           let br, bg, bb;
