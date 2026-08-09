@@ -631,24 +631,44 @@ const Watermark = {
     this.inpaintRectFMM(r);
   },
 
+  /**
+   * 从选区四方向边界加权插值填充(保持背景渐变,不产生矩形边框/色块)。
+   * 关键:对边界外样本做背景中位数过滤,剔除前景物体(如手指、物体边缘),
+   * 只保留真正背景色参与插值,避免把前景复制进修复区产生重影。
+   * 返回 false 表示可用背景样本太少,交由 FMM 兜底。
+   */
   fillByBoundary(src, data, W, H, r) {
     const { x, y, w, h } = r;
+    const sel = new Uint8Array(W * H); // 选区标记(用于羽化混合时找最近外部像素)
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) sel[(y + j) * W + x + i] = 1;
+    }
+
+    // 预先计算四个方向的背景中位数色(沿整条边采样,中位数天然过滤手指/前景)
+    const bTop = this._edgeStats(src, W, H, r, 'top');
+    const bBot = this._edgeStats(src, W, H, r, 'bottom');
+    const bLef = this._edgeStats(src, W, H, r, 'left');
+    const bRig = this._edgeStats(src, W, H, r, 'right');
+    let usable = 0;
+    if (bTop) usable++; if (bBot) usable++; if (bLef) usable++; if (bRig) usable++;
+    if (usable < 2) return false;
+
     const pre = new Float32Array(w * h * 3);
     let ok = 0;
     for (let j = 0; j < h; j++) {
       const cy = y + j;
-      const dTop = y > 0 ? cy - (y - 1) : -1;
-      const dBot = y + h < H ? (y + h) - cy : -1;
+      const dTop = bTop ? cy - (y - 1) : -1;
+      const dBot = bBot ? (y + h) - cy : -1;
       for (let i = 0; i < w; i++) {
         const cx = x + i;
-        const dLef = x > 0 ? cx - (x - 1) : -1;
-        const dRig = x + w < W ? (x + w) - cx : -1;
+        const dLef = bLef ? cx - (x - 1) : -1;
+        const dRig = bRig ? (x + w) - cx : -1;
         let rv = 0, gv = 0, bv = 0, ws = 0;
-        const add = (px, ww) => { rv += src[px] * ww; gv += src[px + 1] * ww; bv += src[px + 2] * ww; ws += ww; };
-        if (dTop >= 0) add(((y - 1) * W + cx) * 4, 1 / (dTop * dTop));
-        if (dBot >= 0) add(((y + h) * W + cx) * 4, 1 / (dBot * dBot));
-        if (dLef >= 0) add((cy * W + (x - 1)) * 4, 1 / (dLef * dLef));
-        if (dRig >= 0) add((cy * W + (x + w)) * 4, 1 / (dRig * dRig));
+        const add = (vv, ww) => { rv += vv[0] * ww; gv += vv[1] * ww; bv += vv[2] * ww; ws += ww; };
+        if (dTop >= 0) add(bTop, 1 / (dTop * dTop));
+        if (dBot >= 0) add(bBot, 1 / (dBot * dBot));
+        if (dLef >= 0) add(bLef, 1 / (dLef * dLef));
+        if (dRig >= 0) add(bRig, 1 / (dRig * dRig));
         if (ws > 0) {
           const q = (j * w + i) * 3;
           pre[q] = rv / ws; pre[q + 1] = gv / ws; pre[q + 2] = bv / ws;
@@ -656,9 +676,9 @@ const Watermark = {
         }
       }
     }
-    if (ok < 10) return false; // 边界样本太少,走 FMM 兜底
+    if (ok < 10) return false;
 
-    // 写入 + 边缘羽化(与选区外最近真实像素在过渡带混合,消除接缝)
+    // 写入 + 边缘羽化(与选区外最近真实像素混合,消除接缝)
     const feather = 2;
     for (let j = 0; j < h; j++) {
       const cy = y + j;
@@ -673,14 +693,14 @@ const Watermark = {
         if (t < 1) {
           let bestD = 1e9, br = 0, bg = 0, bb = 0;
           const cand = [
-            y > 0 ? [((y - 1) * W + cx) * 4, cy - (y - 1)] : null,
-            y + h < H ? [((y + h) * W + cx) * 4, (y + h) - cy] : null,
-            x > 0 ? [(cy * W + (x - 1)) * 4, cx - (x - 1)] : null,
-            x + w < W ? [(cy * W + (x + w)) * 4, (x + w) - cx] : null,
+            bTop ? [bTop, cy - (y - 1)] : null,
+            bBot ? [bBot, (y + h) - cy] : null,
+            bLef ? [bLef, cx - (x - 1)] : null,
+            bRig ? [bRig, (x + w) - cx] : null,
           ];
           for (const c of cand) {
             if (c && c[1] < bestD) {
-              bestD = c[1]; br = src[c[0]]; bg = src[c[0] + 1]; bb = src[c[0] + 2];
+              bestD = c[1]; br = c[0][0]; bg = c[0][1]; bb = c[0][2];
             }
           }
           rv = rv * t + br * (1 - t);
@@ -695,6 +715,47 @@ const Watermark = {
       }
     }
     return true;
+  },
+
+  /** 计算选区某一边外侧的背景代表色(中位数),并用 MAD 剔除离群(手指等前景) */
+  _edgeStats(src, W, H, r, side) {
+    const { x, y, w, h } = r;
+    let sx0 = 0, sy0 = 0, sx1 = 0, sy1 = 0, step = 1;
+    let vx = 0, vy = 0; // 采样像素坐标步进
+    if (side === 'top') { sy0 = y - 1; sy1 = y - 1; sx0 = x; sx1 = x + w - 1; vx = 1; }
+    else if (side === 'bottom') { sy0 = y + h; sy1 = y + h; sx0 = x; sx1 = x + w - 1; vx = 1; }
+    else if (side === 'left') { sx0 = x - 1; sx1 = x - 1; sy0 = y; sy1 = y + h - 1; vy = 1; }
+    else { sx0 = x + w; sx1 = x + w; sy0 = y; sy1 = y + h - 1; vy = 1; }
+    // 越界检查:该边在画布外则无样本
+    if (side === 'top' && y <= 0) return null;
+    if (side === 'bottom' && y + h >= H) return null;
+    if (side === 'left' && x <= 0) return null;
+    if (side === 'right' && x + w >= W) return null;
+    // 若边很长,稀疏采样
+    const len = Math.max(sx1 - sx0, sy1 - sy0) + 1;
+    step = Math.max(1, Math.ceil(len / 96));
+    const rs = [], gs = [], bs = [];
+    let px = sx0, py = sy0, cnt = 0;
+    while (px <= sx1 && py <= sy1 && cnt < 200) {
+      const p = (py * W + px) * 4;
+      rs.push(src[p]); gs.push(src[p + 1]); bs.push(src[p + 2]);
+      px += vx * step; py += vy * step; cnt++;
+    }
+    if (cnt < 4) return null;
+    // 中位数
+    const med = (arr) => { const a = arr.slice().sort((a, b) => a - b); return a[Math.floor(a.length / 2)]; };
+    const mr = med(rs), mg = med(gs), mb = med(bs);
+    // MAD 剔除离群(前景物体边缘明显偏离背景中位数)
+    const dists = rs.map((r, i) => Math.abs(r - mr) + Math.abs(gs[i] - mg) + Math.abs(bs[i] - mb));
+    const md = med(dists.slice().sort((a, b) => a - b));
+    const thresh = Math.max(36, md * 3);
+    let sr = 0, sg = 0, sb = 0, n = 0;
+    for (let i = 0; i < cnt; i++) {
+      const dd = Math.abs(rs[i] - mr) + Math.abs(gs[i] - mg) + Math.abs(bs[i] - mb);
+      if (dd <= thresh) { sr += rs[i]; sg += gs[i]; sb += bs[i]; n++; }
+    }
+    if (n < Math.max(2, cnt * 0.3)) return null;
+    return [sr / n, sg / n, sb / n];
   },
 
   /** 兜底:Telea FMM(仅当选区几乎占满画面、边界样本不足时触发) */
