@@ -18,16 +18,18 @@
 const AIInpaint = {
   // 模型下载地址(hf-mirror 实测: 302 回显 Origin + CDN allow-origin:*)
   // 模型下载地址: 多源自动切换(huggingface.co 直连可用时优先; hf-mirror 国内可达)
-  MODEL_URLS: [
-    'https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
-    'https://hf-mirror.com/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
-  ],
   // 模型下载地址: 多源自动切换(hf-mirror 国内可达; huggingface.co 直连可用时更快)
   MODEL_URLS: [
     'https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
     'https://hf-mirror.com/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
   ],
-  MODEL_NAME: 'migan_pipeline_v2.onnx',
+  // 模型下载地址: 同源(自己仓库)优先, 彻底摆脱第三方源; 之后是 huggingface.co / hf-mirror 兜底
+  MODEL_URLS: [
+    './models/migan.onnx',
+    'https://huggingface.co/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
+    'https://hf-mirror.com/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx',
+  ],
+  MODEL_NAME: 'migan.onnx',
   MODEL_SIZE: 28079181,
   // onnxruntime-web CDN(jsdelivr, 已实测带 CORS 头)
   ORT_CDN: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.16.3/dist/',

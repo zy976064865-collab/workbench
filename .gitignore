@@ -1,11 +1,10 @@
-# 忽略部署辅助脚本
+﻿# 忽略部署辅助脚本
 scripts/
 
 # 本地测试产物
 outputs/
 
-# 本地AI模型与推理测试产物(不入库,模型运行时从HF加载)
-models/
+# 本地AI模型与推理测试产物(模型随仓库部署,同源加载最稳)
 node_modules/
 test_*.js
 crop_region.js
