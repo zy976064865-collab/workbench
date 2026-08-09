@@ -484,9 +484,66 @@ const Watermark = {
    * 抗噪能力强(真实照片噪声大时也能稳定匹配),再用距离惩罚选最近者。
    * 找到后复制真实纹理填充,避免背景被抹平成色块。
    */
+  /**
+   * 从选区附近寻找一块同尺寸、边缘形状最匹配的真实背景块。
+   * 策略:比较选区四边外侧边缘带的"形状"(去均值后的沿边变化),
+   * 允许候选块与选区存在整体色差(渐变背景也能匹配),匹配后记录
+   * 颜色偏移供 applySourcePatch 校正,避免色差接缝。
+   */
   findSourcePatch(data, W, H, r) {
     const { x, y, w, h } = r;
     if (w < 2 || h < 2 || w > W * 0.7 || h > H * 0.7) return null;
+
+    // 纹理门控:用"去除线性趋势后的残差"判断边缘带是否为真纹理。
+    // 平滑渐变(线性趋势主导)走边界插值更自然;残差大(高频纹理)才用 patch 复制。
+    {
+      const E = 3;
+      let resid = 0, cnt = 0, total = 0;
+      const sample = (x0, y0, dx, dy, len) => {
+        const seq = [];
+        for (let k = 0; k < len; k += 2) {
+          let rr = 0, gg = 0, bb = 0, nn = 0;
+          for (let d = 1; d <= E; d++) {
+            const ex = x0 + dx * k + (dx !== 0 ? dx * d : 0);
+            const ey = y0 + dy * k + (dy !== 0 ? dy * d : 0);
+            if (ex < 0 || ey < 0 || ex >= W || ey >= H) continue;
+            const p2 = (ey * W + ex) * 4;
+            rr += data[p2]; gg += data[p2 + 1]; bb += data[p2 + 2]; nn++;
+          }
+          if (nn) seq.push([rr / nn, gg / nn, bb / nn]);
+        }
+        if (seq.length < 5) return;
+        const n = seq.length;
+        let sx2 = 0, sx = 0;
+        for (let i = 0; i < n; i++) { sx += i; sx2 += i * i; }
+        const denom = n * sx2 - sx * sx;
+        for (let c = 0; c < 3; c++) {
+          let sy = 0, sxy = 0;
+          for (let i = 0; i < n; i++) { sy += seq[i][c]; sxy += i * seq[i][c]; }
+          let slope = 0;
+          if (denom > 0) slope = (n * sxy - sx * sy) / denom;
+          const intercept = (sy - slope * sx) / n;
+          let r2 = 0, t2 = 0;
+          for (let i = 0; i < n; i++) {
+            const pred = intercept + slope * i;
+            const d2 = seq[i][c] - pred;
+            r2 += d2 * d2;
+            t2 += (seq[i][c] - sy / n) ** 2;
+          }
+          resid += r2; total += t2; cnt += n;
+        }
+      };
+      if (y > 0) sample(x, y - 1, 1, 0, w);
+      if (y + h < H) sample(x, y + h, 1, 0, w);
+      if (x > 0) sample(x - 1, y, 0, 1, h);
+      if (x + w < W) sample(x + w, y, 0, 1, h);
+      // 残差占比 < 45% 视为平滑(线性趋势主导),走边界插值
+      if (cnt && total > 0 && (resid / total) < 0.45) return null;
+    }
+// 亮度带门控:候选块边缘带平均亮度必须与选区接近(≤ 35),否则其内部
+    // 渐变/光照位置不同,单一颜色偏移无法校正,复制会造成亮度断层。
+    // 由 scoreAt 在计算颜色偏移时同步评估并拒绝跨亮度带候选。
+    const lumOffMax = 35;
 
     const maxCandidates = 6000;
     const radius = Math.max(160, Math.min(Math.max(w, h) * 5, Math.max(W, H)));
@@ -494,65 +551,94 @@ const Watermark = {
     const minY = Math.max(0, y - radius), maxY = Math.min(H - h, y + radius);
     const area = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
     const step = Math.max(1, Math.ceil(Math.sqrt(area / maxCandidates)));
-    const E = 3; // 边缘带宽度(px)
+    const E = 3;
 
-    // 计算一条边缘带(3px 厚)的平均 RGB
-    const edgeAvg = (x0, y0, dx, dy, len) => {
-      let r = 0, g = 0, b = 0, n = 0;
+    // 边缘带采样序列:沿边方向每 2px 取一点(带内 3px 均值),返回 [{r,g,b}...]
+    const edgeSeq = (x0, y0, dx, dy, len) => {
+      const seq = [];
       for (let k = 0; k < len; k += 2) {
+        let r2 = 0, g = 0, b = 0, n = 0;
         for (let d = 1; d <= E; d++) {
           const ex = x0 + dx * k + (dx !== 0 ? dx * d : 0);
           const ey = y0 + dy * k + (dy !== 0 ? dy * d : 0);
           if (ex < 0 || ey < 0 || ex >= W || ey >= H) continue;
           const p = (ey * W + ex) * 4;
-          r += data[p]; g += data[p + 1]; b += data[p + 2]; n++;
+          r2 += data[p]; g += data[p + 1]; b += data[p + 2]; n++;
         }
+        if (n) seq.push([r2 / n, g / n, b / n]);
       }
-      return n ? [r / n, g / n, b / n] : null;
+      return seq;
+    };
+    const avgSeq = (seq) => {
+      let r2 = 0, g = 0, b = 0;
+      for (const p of seq) { r2 += p[0]; g += p[1]; b += p[2]; }
+      const n = seq.length || 1;
+      return [r2 / n, g / n, b / n];
+    };
+    const normSeq = (seq) => {
+      const m = avgSeq(seq);
+      return { s: seq.map(p => [p[0] - m[0], p[1] - m[1], p[2] - m[2]]), m };
     };
 
-    // 选区四条边缘带(基准)
-    const baseBands = [
-      y > 0 ? edgeAvg(x, y - 1, 1, 0, w) : null,          // top
-      y + h < H ? edgeAvg(x, y + h, 1, 0, w) : null,      // bottom
-      x > 0 ? edgeAvg(x - 1, y, 0, 1, h) : null,          // left
-      x + w < W ? edgeAvg(x + w, y, 0, 1, h) : null,      // right
+    // 选区基准:每条边的采样序列(含均值)
+    const baseEdges = [
+      y > 0 ? edgeSeq(x, y - 1, 1, 0, w) : null,
+      y + h < H ? edgeSeq(x, y + h, 1, 0, w) : null,
+      x > 0 ? edgeSeq(x - 1, y, 0, 1, h) : null,
+      x + w < W ? edgeSeq(x + w, y, 0, 1, h) : null,
     ];
-    if (!baseBands[0] && !baseBands[1] && !baseBands[2] && !baseBands[3]) return null;
+    if (!baseEdges[0] && !baseEdges[1] && !baseEdges[2] && !baseEdges[3]) return null;
+    const baseN = baseEdges.map(e => (e && e.length >= 3) ? normSeq(e) : null);
 
+    // 候选块必须与选区完全不相交(不允许含水印的块参与复制)
     const overlapsSelection = (sx, sy) => !(
-      sx + w + E <= x || sx >= x + w + E || sy + h + E <= y || sy >= y + h + E
+      sx + w <= x || sx >= x + w || sy + h <= y || sy >= y + h
     );
 
-    // 候选块与选区的四边边缘带相似度
+    // 评分:形状匹配(去均值后差) + 距离惩罚;附带颜色偏移供校正
     const scoreAt = (sx, sy) => {
       if (sx < 0 || sy < 0 || sx + w > W || sy + h > H || overlapsSelection(sx, sy)) return null;
-      const cb = [
-        sy > 0 ? edgeAvg(sx, sy - 1, 1, 0, w) : null,
-        sy + h < H ? edgeAvg(sx, sy + h, 1, 0, w) : null,
-        sx > 0 ? edgeAvg(sx - 1, sy, 0, 1, h) : null,
-        sx + w < W ? edgeAvg(sx + w, sy, 0, 1, h) : null,
+      const cEdges = [
+        sy > 0 ? edgeSeq(sx, sy - 1, 1, 0, w) : null,
+        sy + h < H ? edgeSeq(sx, sy + h, 1, 0, w) : null,
+        sx > 0 ? edgeSeq(sx - 1, sy, 0, 1, h) : null,
+        sx + w < W ? edgeSeq(sx + w, sy, 0, 1, h) : null,
       ];
-      let err = 0, n = 0;
+      let err = 0, n = 0, dr = 0, dg = 0, db = 0, nn = 0, lumD = 0;
       for (let i = 0; i < 4; i++) {
-        if (baseBands[i] && cb[i]) {
-          const dr = baseBands[i][0] - cb[i][0];
-          const dg = baseBands[i][1] - cb[i][1];
-          const db = baseBands[i][2] - cb[i][2];
-          err += (dr * dr + dg * dg + db * db) / 3;
+        if (baseN[i] && cEdges[i] && cEdges[i].length >= 3) {
+          const L = Math.min(baseN[i].s.length, cEdges[i].length);
+          const m = avgSeq(cEdges[i]);
+          // 候选边带与基准边带的平均亮度差(该边贡献)
+          lumD += Math.abs((m[0] + m[1] + m[2]) / 3 - (baseN[i].m[0] + baseN[i].m[1] + baseN[i].m[2]) / 3);
+          let e = 0;
+          for (let k = 0; k < L; k++) {
+            const bp = baseN[i].s[k];
+            const cp = cEdges[i][k];
+            const cr = cp[0] - m[0], cg = cp[1] - m[1], cb = cp[2] - m[2];
+            e += (bp[0] - cr) ** 2 + (bp[1] - cg) ** 2 + (bp[2] - cb) ** 2;
+          }
+          err += e / L / 3;
           n++;
+          // 颜色偏移 = 候选均值 - 基准均值(patch 内容需加此偏移)
+          dr += m[0] - baseN[i].m[0];
+          dg += m[1] - baseN[i].m[1];
+          db += m[2] - baseN[i].m[2];
+          nn++;
         }
       }
       if (!n) return null;
+      // 跨亮度带候选拒绝:平均亮度差超过阈值则放弃该候选
+      if (lumD / n > lumOffMax) return null;
       const dx = sx - x, dy = sy - y;
       const distancePenalty = (dx * dx + dy * dy) / Math.max(1, w * w + h * h) * 6;
-      return err / n + distancePenalty;
+      return { score: err / n + distancePenalty, off: [dr / nn, dg / nn, db / nn] };
     };
 
     let best = null;
     const consider = (sx, sy) => {
-      const score = scoreAt(sx, sy);
-      if (score !== null && (!best || score < best.score)) best = { sx, sy, score };
+      const c = scoreAt(sx, sy);
+      if (c && (!best || c.score < best.score)) best = { sx, sy, score: c.score, off: c.off };
     };
     for (let sy = minY; sy <= maxY; sy += step) {
       for (let sx = minX; sx <= maxX; sx += step) consider(sx, sy);
@@ -563,20 +649,27 @@ const Watermark = {
     for (let sy = Math.max(minY, best.sy - refine); sy <= Math.min(maxY, best.sy + refine); sy++) {
       for (let sx = Math.max(minX, best.sx - refine); sx <= Math.min(maxX, best.sx + refine); sx++) consider(sx, sy);
     }
-    return best && Math.sqrt(best.score) <= 100 ? best : null;
+    // 阈值:形状误差(去均值后)比绝对色差更宽松
+    return (best && Math.sqrt(best.score) <= 130) ? { sx: best.sx, sy: best.sy, off: best.off } : null;
   },
 
+  /**
+   * 把找到的纹理块复制进选区,并做颜色校正:整体平移使其边缘带
+   * 与选区边缘带一致,消除色差接缝;边缘羽化融合消除矩形边框。
+   */
   applySourcePatch(src, data, W, H, r, patch) {
     const { x, y, w, h } = r;
     const { sx, sy } = patch;
+    const off = patch.off || [0, 0, 0];
     const copied = new Uint8ClampedArray(w * h * 4);
-
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
         const from = ((sy + j) * W + sx + i) * 4;
         const to = (j * w + i) * 4;
-        copied[to] = src[from]; copied[to + 1] = src[from + 1];
-        copied[to + 2] = src[from + 2]; copied[to + 3] = 255;
+        copied[to] = Math.max(0, Math.min(255, src[from] + off[0]));
+        copied[to + 1] = Math.max(0, Math.min(255, src[from + 1] + off[1]));
+        copied[to + 2] = Math.max(0, Math.min(255, src[from + 2] + off[2]));
+        copied[to + 3] = 255;
       }
     }
 
@@ -588,18 +681,16 @@ const Watermark = {
         const d = Math.min(i, w - 1 - i, j, h - 1 - j);
         let alpha = 1;
         let outside = -1;
-
         if (d < feather) {
           const t = (d + 1) / (feather + 1);
           alpha = t * t * (3 - 2 * t);
           let ox = x + i, oy = y + j;
-          if (i === d && x > 0) ox = x - 1;
-          else if (w - 1 - i === d && x + w < W) ox = x + w;
-          else if (j === d && y > 0) oy = y - 1;
+          if (d === i && x > 0) ox = x - 1;
+          else if (d === w - 1 - i && x + w < W) ox = x + w;
+          else if (d === j && y > 0) oy = y - 1;
           else if (y + h < H) oy = y + h;
           if (ox !== x + i || oy !== y + j) outside = (oy * W + ox) * 4;
         }
-
         for (let c = 0; c < 3; c++) {
           const edge = outside >= 0 ? src[outside + c] : copied[from + c];
           data[to + c] = Math.round(copied[from + c] * alpha + edge * (1 - alpha));
@@ -609,11 +700,6 @@ const Watermark = {
     }
   },
 
-  /**
-   * 从选区四方向边界加权插值填充(保持背景渐变,不产生矩形边框/色块)。
-   * 对每个待修复像素,取选区外上/下/左/右最近的 1px 真实背景,按距离倒数平方加权合成。
-   * 返回 false 表示边界样本太少(选区几乎占满画面),交由 FMM 兜底。
-   */
   /** 智能修复入口:patch 纹理复制 -> 边界插值 -> FMM 兜底 */
   inpaintRect(r) {
     const { x, y, w, h } = r;
@@ -643,38 +729,37 @@ const Watermark = {
    * 只保留真正背景色参与插值,避免把前景复制进修复区产生重影。
    * 返回 false 表示可用背景样本太少,交由 FMM 兜底。
    */
+  /**
+   * 从选区四方向边界插值填充:对每条边采样一条"背景色带",
+   * 保留沿边方向的纹理/渐变变化(而非单一中位数色),再按距离
+   * 加权合成。选区贴近画布边缘时自动降级为可用方向。
+   * 返回 false 表示可用背景样本太少,交由 FMM 兜底。
+   */
   fillByBoundary(src, data, W, H, r) {
     const { x, y, w, h } = r;
-    const sel = new Uint8Array(W * H); // 选区标记(用于羽化混合时找最近外部像素)
-    for (let j = 0; j < h; j++) {
-      for (let i = 0; i < w; i++) sel[(y + j) * W + x + i] = 1;
-    }
-
-    // 预先计算四个方向的背景中位数色(沿整条边采样,中位数天然过滤手指/前景)
-    const bTop = this._edgeStats(src, W, H, r, 'top');
-    const bBot = this._edgeStats(src, W, H, r, 'bottom');
-    const bLef = this._edgeStats(src, W, H, r, 'left');
-    const bRig = this._edgeStats(src, W, H, r, 'right');
+    const bands = this._edgeBands(src, W, H, r);
     let usable = 0;
-    if (bTop) usable++; if (bBot) usable++; if (bLef) usable++; if (bRig) usable++;
+    if (bands.top) usable++; if (bands.bottom) usable++;
+    if (bands.left) usable++; if (bands.right) usable++;
     if (usable < 2) return false;
 
     const pre = new Float32Array(w * h * 3);
     let ok = 0;
     for (let j = 0; j < h; j++) {
       const cy = y + j;
-      const dTop = bTop ? cy - (y - 1) : -1;
-      const dBot = bBot ? (y + h) - cy : -1;
+      const dTop = bands.top ? cy - (y - 1) : -1;
+      const dBot = bands.bottom ? (y + h) - cy : -1;
       for (let i = 0; i < w; i++) {
         const cx = x + i;
-        const dLef = bLef ? cx - (x - 1) : -1;
-        const dRig = bRig ? (x + w) - cx : -1;
+        const dLef = bands.left ? cx - (x - 1) : -1;
+        const dRig = bands.right ? (x + w) - cx : -1;
         let rv = 0, gv = 0, bv = 0, ws = 0;
         const add = (vv, ww) => { rv += vv[0] * ww; gv += vv[1] * ww; bv += vv[2] * ww; ws += ww; };
-        if (dTop >= 0) add(bTop, 1 / (dTop * dTop));
-        if (dBot >= 0) add(bBot, 1 / (dBot * dBot));
-        if (dLef >= 0) add(bLef, 1 / (dLef * dLef));
-        if (dRig >= 0) add(bRig, 1 / (dRig * dRig));
+        // 取该像素沿边投影处的采样色(保留纹理),按垂直距离平方加权
+        if (dTop >= 0) add(bands.top[Math.min(i, bands.top.length - 1)], 1 / (dTop * dTop + 1));
+        if (dBot >= 0) add(bands.bottom[Math.min(i, bands.bottom.length - 1)], 1 / (dBot * dBot + 1));
+        if (dLef >= 0) add(bands.left[Math.min(j, bands.left.length - 1)], 1 / (dLef * dLef + 1));
+        if (dRig >= 0) add(bands.right[Math.min(j, bands.right.length - 1)], 1 / (dRig * dRig + 1));
         if (ws > 0) {
           const q = (j * w + i) * 3;
           pre[q] = rv / ws; pre[q + 1] = gv / ws; pre[q + 2] = bv / ws;
@@ -697,18 +782,13 @@ const Watermark = {
         const q = (j * w + i) * 3;
         let rv = pre[q], gv = pre[q + 1], bv = pre[q + 2];
         if (t < 1) {
-          let bestD = 1e9, br = 0, bg = 0, bb = 0;
-          const cand = [
-            bTop ? [bTop, cy - (y - 1)] : null,
-            bBot ? [bBot, (y + h) - cy] : null,
-            bLef ? [bLef, cx - (x - 1)] : null,
-            bRig ? [bRig, (x + w) - cx] : null,
-          ];
-          for (const c of cand) {
-            if (c && c[1] < bestD) {
-              bestD = c[1]; br = c[0][0]; bg = c[0][1]; bb = c[0][2];
-            }
-          }
+          // 羽化混合:取选区外该像素沿"最近边缘"方向 1px 的真实背景色(读 src)
+          let br, bg, bb;
+          if (dEdge === i && x > 0) { const pp = (cy * W + x - 1) * 4; br = src[pp]; bg = src[pp + 1]; bb = src[pp + 2]; }
+          else if (dEdge === w - 1 - i && x + w < W) { const pp = (cy * W + x + w) * 4; br = src[pp]; bg = src[pp + 1]; bb = src[pp + 2]; }
+          else if (dEdge === j && y > 0) { const pp = ((y - 1) * W + cx) * 4; br = src[pp]; bg = src[pp + 1]; bb = src[pp + 2]; }
+          else if (y + h < H) { const pp = ((y + h) * W + cx) * 4; br = src[pp]; bg = src[pp + 1]; bb = src[pp + 2]; }
+          else { br = rv; bg = gv; bb = bv; }
           rv = rv * t + br * (1 - t);
           gv = gv * t + bg * (1 - t);
           bv = bv * t + bb * (1 - t);
@@ -723,6 +803,48 @@ const Watermark = {
     return true;
   },
 
+  /** 采样选区四边外侧的背景色带(2px 厚均值,离群点用邻域替换) */
+  _edgeBands(src, W, H, r) {
+    const { x, y, w, h } = r;
+    const E = 2;
+    const band = (x0, y0, dx, dy, len) => {
+      const out = [];
+      for (let k = 0; k < len; k++) {
+        let rr = 0, gg = 0, bb = 0, nn = 0;
+        for (let d = 1; d <= E; d++) {
+          const ex = x0 + dx * k + (dx !== 0 ? dx * d : 0);
+          const ey = y0 + dy * k + (dy !== 0 ? dy * d : 0);
+          if (ex < 0 || ey < 0 || ex >= W || ey >= H) continue;
+          const p = (ey * W + ex) * 4;
+          rr += src[p]; gg += src[p + 1]; bb += src[p + 2]; nn++;
+        }
+        if (nn) out.push([rr / nn, gg / nn, bb / nn]);
+      }
+      return out;
+    };
+    const clean = (arr) => {
+      if (!arr || arr.length < 4) return arr;
+      const arrR = arr.map(v => v[0]), arrG = arr.map(v => v[1]), arrB = arr.map(v => v[2]);
+      const med = (a) => a.slice().sort((p, q) => p - q)[Math.floor(a.length / 2)];
+      const mr = med(arrR), mg = med(arrG), mb = med(arrB);
+      const dists = arr.map(v => Math.abs(v[0] - mr) + Math.abs(v[1] - mg) + Math.abs(v[2] - mb)).sort((p, q) => p - q);
+      const md = dists[Math.floor(dists.length / 2)];
+      const thresh = Math.max(42, md * 3);
+      return arr.map((v, i) => {
+        if (Math.abs(v[0] - mr) + Math.abs(v[1] - mg) + Math.abs(v[2] - mb) <= thresh) return v;
+        const a = arr[Math.max(0, i - 1)], b = arr[Math.min(arr.length - 1, i + 1)];
+        return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+      });
+    };
+    return {
+      top: y > 0 ? clean(band(x, y - 1, 1, 0, w)) : null,
+      bottom: y + h < H ? clean(band(x, y + h, 1, 0, w)) : null,
+      left: x > 0 ? clean(band(x - 1, y, 0, 1, h)) : null,
+      right: x + w < W ? clean(band(x + w, y, 0, 1, h)) : null,
+    };
+  },
+
+  /** 计算选区某一边外侧的背景代表色(中位数),并用 MAD 剔除离群(手指等前景) */
   /** 计算选区某一边外侧的背景代表色(中位数),并用 MAD 剔除离群(手指等前景) */
   _edgeStats(src, W, H, r, side) {
     const { x, y, w, h } = r;
