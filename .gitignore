@@ -1,5 +1,14 @@
-﻿# 忽略部署辅助脚本
+# 忽略部署辅助脚本
 scripts/
 
 # 本地测试产物
 outputs/
+
+# 本地AI模型与推理测试产物(不入库,模型运行时从HF加载)
+models/
+node_modules/
+test_*.js
+crop_region.js
+setup_ort*.js
+*.tgz
+_newfn.txt

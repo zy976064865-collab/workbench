@@ -1,7 +1,7 @@
 ﻿/**
  * Service Worker —— 离线可用 + 缓存静态资源
  */
-const CACHE = 'workbench-v15';
+const CACHE = 'workbench-v16';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,7 @@ const ASSETS = [
   './js/tasks.js',
   './js/calendar.js',
   './js/watermark.js',
+  './js/ai.js',
   './js/app.js',
   './icons/icon-192.png',
   './icons/icon-512.png',

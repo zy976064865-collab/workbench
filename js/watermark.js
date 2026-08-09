@@ -373,7 +373,7 @@ const Watermark = {
     return { x, y, w, h };
   },
 
-  /** ✨ 智能修复(FMM + 细节填充),针对选区 */
+  /** ✨ 智能修复: AI 深度学习修复(MI-GAN) 优先, 失败回退传统算法 */
   inpaintSelected() {
     const r = this.getSelectedRect();
     if (!r) { Toast.show('请先框选水印区域'); return; }
@@ -392,22 +392,46 @@ const Watermark = {
     // 用 requestAnimationFrame 让 loading 先渲染
     requestAnimationFrame(() => {
       setTimeout(() => {
-        try {
-          this.pushHistory();
-          this.inpaintRect(r);
-          this.rects = this.rects.filter((_, i) => i !== this.selIndex);
-          this.selIndex = -1;
-          this.updateToolUI();
-          this.redraw();
-          this.hideLoading();
-          this._processing = false;
-          Toast.show('智能修复完成 ✨');
-        } catch (err) {
-          console.error(err);
-          this.hideLoading();
-          this._processing = false;
-          Toast.show('处理失败,请重试');
-        }
+        // 异步执行: AI 模型优先, 失败自动回退传统算法
+        (async () => {
+          try {
+            this.pushHistory();
+            let done = false;
+            // ① AI 深度学习修复(MI-GAN): 生成与背景一致的细节纹理, 消除镜像痕迹
+            if (window.AIInpaint) {
+              try {
+                // 停止动画进度条, 改为 AI 真实进度(模型下载/推理)
+                clearInterval(this._barTimer);
+                const onProgress = (text, pct) => {
+                  document.getElementById('loadingText').textContent = text;
+                  document.getElementById('loadingBar').style.width = (pct || 0) + '%';
+                };
+                await AIInpaint.inpaintRect(r, { offCtx: this.offCtx, onProgress });
+                document.getElementById('loadingText').textContent = 'AI 修复完成';
+                document.getElementById('loadingBar').style.width = '100%';
+                done = true;
+              } catch (aiErr) {
+                console.warn('AI 修复不可用,回退传统算法:', aiErr);
+                // 恢复动画进度条
+                this.showLoading('正在智能修复…', true);
+              }
+            }
+            // ② 回退: 传统纹理块算法(保底, 不出错)
+            if (!done) this.inpaintRect(r);
+            this.rects = this.rects.filter((_, i) => i !== this.selIndex);
+            this.selIndex = -1;
+            this.updateToolUI();
+            this.redraw();
+            this.hideLoading();
+            this._processing = false;
+            Toast.show(done ? 'AI 智能修复完成 ✓' : '智能修复完成 ✓');
+          } catch (err) {
+            console.error(err);
+            this.hideLoading();
+            this._processing = false;
+            Toast.show('处理失败,请重试');
+          }
+        })();
       }, 30);
     });
   },
