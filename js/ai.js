@@ -1,4 +1,4 @@
-/**
+﻿/**
  * AI 图像修复模块 —— 基于 MI-GAN 深度学习模型,彻底替代传统"贴纹理块"算法
  *
  * 背景: 旧算法(findSourcePatch/fillByBoundary)本质是"从图内别处找纹理块贴进选区",
@@ -97,12 +97,20 @@ const AIInpaint = {
   /**
    * 下载模型并显示真实进度(ReadableStream; 不支持时退化为无进度下载)
    */
+  /** 带超时的 fetch: 60 秒内无响应则中止, 避免卡死在一个源上 */
+  fetchWithTimeout(url, ms) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    return fetch(url, { mode: 'cors', signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  },
+
   async downloadModel(onProgress) {
     // 多源依次尝试: 第一个成功的源继续
     let lastErr = null;
     for (const url of this.MODEL_URLS) {
       try {
-        const res = await fetch(url, { mode: 'cors' });
+        if (onProgress) onProgress('正在连接模型源…(首次使用需下载 27MB)', 5);
+        const res = await this.fetchWithTimeout(url, 60000);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return await this.readModelStream(res, onProgress);
       } catch (err) {
@@ -121,17 +129,27 @@ const AIInpaint = {
       const reader = res.body.getReader();
       const chunks = [];
       let received = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        if (onProgress) {
-          onProgress(
-            '首次使用,正在下载 AI 模型 ' + (received / 1048576).toFixed(1) + '/' + (total / 1048576).toFixed(1) + ' MB',
-            Math.min(90, Math.round(received / total * 100))
-          );
+      let lastDataAt = Date.now();
+      // 停滞看门狗: 30 秒无新数据则取消本次读取(触发切换下一源)
+      const watchdog = setInterval(() => {
+        if (Date.now() - lastDataAt > 30000) { try { reader.cancel(); } catch (e) {} }
+      }, 5000);
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          lastDataAt = Date.now();
+          chunks.push(value);
+          received += value.length;
+          if (onProgress) {
+            onProgress(
+              '首次使用,正在下载 AI 模型 ' + (received / 1048576).toFixed(1) + '/' + (total / 1048576).toFixed(1) + ' MB',
+              Math.min(90, Math.round(received / total * 100))
+            );
+          }
         }
+      } finally {
+        clearInterval(watchdog);
       }
       const buf = new Uint8Array(received);
       let off = 0;
