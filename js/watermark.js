@@ -493,7 +493,7 @@ const Watermark = {
   findSourcePatch(data, W, H, r) {
     const { x, y, w, h } = r;
     if (w < 2 || h < 2 || w > W * 0.7 || h > H * 0.7) return null;
-    // 大选区(人像/复杂纹理常见):跳过"平滑判定直接回退插值",避免把丰富纹理误判为平滑色块
+    // 大选区(人像/复杂纹理常见):仅放宽亮度门控,不跳过平滑判定(避免渐变背景误匹配)
     const isLarge = (w > 40 && h > 40) || (w * h > 3000);
 
     // 纹理门控:用"去除线性趋势后的残差"判断边缘带是否为真纹理。
@@ -633,7 +633,7 @@ const Watermark = {
       // 跨亮度带候选拒绝:平均亮度差超过阈值则放弃该候选
       if (lumD / n > lumOffMax) return null;
       const dx = sx - x, dy = sy - y;
-      const distancePenalty = (dx * dx + dy * dy) / Math.max(1, w * w + h * h) * 6;
+      const distancePenalty = (dx * dx + dy * dy) / Math.max(1, w * w + h * h) * 4;
       return { score: err / n + distancePenalty, off: [dr / nn, dg / nn, db / nn] };
     };
 
@@ -652,7 +652,31 @@ const Watermark = {
       for (let sx = Math.max(minX, best.sx - refine); sx <= Math.min(maxX, best.sx + refine); sx++) consider(sx, sy);
     }
     // 阈值:形状误差(去均值后)比绝对色差更宽松
-    return (best && Math.sqrt(best.score) <= 130) ? { sx: best.sx, sy: best.sy, off: best.off } : null;
+    if (best && Math.sqrt(best.score) <= 200) return { sx: best.sx, sy: best.sy, off: best.off };
+    // 兜底:形状匹配超阈值但候选亮度接近且内部有真实纹理时仍复制。
+    // 人像选区四边常是不同部位(额头/头发/肩膀),边缘带形状差异大,插值只能得到
+    // 平均色+轻微抖动;复制真实纹理块+颜色偏移校正远比平滑色块自然。
+    if (best && this._patchHasTexture(data, W, H, best.sx, best.sy, w, h)) {
+      return { sx: best.sx, sy: best.sy, off: best.off };
+    }
+    return null;
+  },
+
+  /** 判断候选块内部是否有真实纹理(亮度标准差足够大);纯色/平滑块不值得复制 */
+  _patchHasTexture(data, W, H, sx, sy, w, h) {
+    let sum = 0, sumSq = 0, n = 0;
+    const step = Math.max(1, Math.round(Math.sqrt((w * h) / 400)));
+    for (let j = 0; j < h; j += step) {
+      for (let i = 0; i < w; i += step) {
+        const p = ((sy + j) * W + sx + i) * 4;
+        const l = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+        sum += l; sumSq += l * l; n++;
+      }
+    }
+    if (n < 4) return false;
+    const mean = sum / n;
+    const std = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+    return std >= 12;
   },
 
   /**
@@ -880,7 +904,7 @@ const Watermark = {
       const mr = med(arrR), mg = med(arrG), mb = med(arrB);
       const dists = arr.map(v => Math.abs(v[0] - mr) + Math.abs(v[1] - mg) + Math.abs(v[2] - mb)).sort((p, q) => p - q);
       const md = dists[Math.floor(dists.length / 2)];
-      const thresh = Math.max(42, md * 3);
+      const thresh = Math.max(56, md * 4);
       return arr.map((v, i) => {
         if (Math.abs(v[0] - mr) + Math.abs(v[1] - mg) + Math.abs(v[2] - mb) <= thresh) return v;
         const a = arr[Math.max(0, i - 1)], b = arr[Math.min(arr.length - 1, i + 1)];
