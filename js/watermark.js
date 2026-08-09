@@ -687,23 +687,69 @@ const Watermark = {
     const { x, y, w, h } = r;
     const { sx, sy } = patch;
     const off = patch.off || [0, 0, 0];
-    const copied = new Uint8ClampedArray(w * h * 4);
-    for (let j = 0; j < h; j++) {
-      for (let i = 0; i < w; i++) {
-        const from = ((sy + j) * W + sx + i) * 4;
-        const to = (j * w + i) * 4;
-        copied[to] = Math.max(0, Math.min(255, src[from] + off[0]));
-        copied[to + 1] = Math.max(0, Math.min(255, src[from + 1] + off[1]));
-        copied[to + 2] = Math.max(0, Math.min(255, src[from + 2] + off[2]));
-        copied[to + 3] = 255;
+
+    // ① 先计算选区内低频基线:四周边界插值(保留选区自身渐变/光照/肤色)。
+    //    修复区中心与周边明暗完全一致,不再出现 patch 整体偏亮/偏暗的色差。
+    const base = new Uint8ClampedArray(w * h * 4);
+    {
+      const tmp = new Uint8ClampedArray(data);
+      const bands = this._edgeBands(tmp, W, H, r);
+      let usable = 0;
+      if (bands.top) usable++; if (bands.bottom) usable++;
+      if (bands.left) usable++; if (bands.right) usable++;
+      if (usable >= 2) {
+        for (let j = 0; j < h; j++) {
+          const cy = y + j;
+          const dTop = bands.top ? cy - (y - 1) : -1;
+          const dBot = bands.bottom ? (y + h) - cy : -1;
+          for (let i = 0; i < w; i++) {
+            const cx = x + i;
+            const dLef = bands.left ? cx - (x - 1) : -1;
+            const dRig = bands.right ? (x + w) - cx : -1;
+            let rv = 0, gv = 0, bv = 0, ws = 0;
+            const add = (vv, ww) => { rv += vv[0] * ww; gv += vv[1] * ww; bv += vv[2] * ww; ws += ww; };
+            if (dTop >= 0) add(bands.top[Math.min(i, bands.top.length - 1)], 1 / (dTop * dTop + 1));
+            if (dBot >= 0) add(bands.bottom[Math.min(i, bands.bottom.length - 1)], 1 / (dBot * dBot + 1));
+            if (dLef >= 0) add(bands.left[Math.min(j, bands.left.length - 1)], 1 / (dLef * dLef + 1));
+            if (dRig >= 0) add(bands.right[Math.min(j, bands.right.length - 1)], 1 / (dRig * dRig + 1));
+            if (ws > 0) {
+              const q = (j * w + i) * 4;
+              base[q] = rv / ws; base[q + 1] = gv / ws; base[q + 2] = bv / ws;
+            }
+          }
+        }
       }
     }
 
+    // ② patch 提供高频细节:去均值后的残差 × 增益
+    const det = new Float32Array(w * h * 3);
+    {
+      let mr = 0, mg = 0, mb = 0, n = 0;
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          const from = ((sy + j) * W + sx + i) * 4;
+          mr += src[from]; mg += src[from + 1]; mb += src[from + 2]; n++;
+        }
+      }
+      mr /= n; mg /= n; mb /= n;
+      const gain = 0.75;
+      for (let j = 0; j < h; j++) {
+        for (let i = 0; i < w; i++) {
+          const from = ((sy + j) * W + sx + i) * 4;
+          const q = (j * w + i) * 3;
+          det[q] = (src[from] - mr) * gain;
+          det[q + 1] = (src[from + 1] - mg) * gain;
+          det[q + 2] = (src[from + 2] - mb) * gain;
+        }
+      }
+    }
+
+    // ③ 合成:基线(选区自身明暗) + patch 高频纹理;边缘羽化贴合真实像素
     const feather = Math.max(4, Math.min(10, Math.round(Math.min(w, h) * 0.1)));
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
         const to = ((y + j) * W + x + i) * 4;
-        const from = (j * w + i) * 4;
+        const q = (j * w + i) * 4;
         const d = Math.min(i, w - 1 - i, j, h - 1 - j);
         let alpha = 1;
         let outside = -1;
@@ -717,14 +763,22 @@ const Watermark = {
           else if (y + h < H) oy = y + h;
           if (ox !== x + i || oy !== y + j) outside = (oy * W + ox) * 4;
         }
+        const dq = q / 4 * 3;
         for (let c = 0; c < 3; c++) {
-          const edge = outside >= 0 ? src[outside + c] : copied[from + c];
-          data[to + c] = Math.round(copied[from + c] * alpha + edge * (1 - alpha));
+          let v = base[q + c] + det[dq + c];
+          v += off[c] * 0.25;
+          v = Math.max(0, Math.min(255, v));
+          if (alpha < 1) {
+            const edge = outside >= 0 ? src[outside + c] : v;
+            v = v * alpha + edge * (1 - alpha);
+          }
+          data[to + c] = Math.round(v);
         }
         data[to + 3] = 255;
       }
     }
   },
+
 
   /** 智能修复入口:patch 纹理复制 -> 边界插值 -> FMM 兜底 */
   inpaintRect(r) {
