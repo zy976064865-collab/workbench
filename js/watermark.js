@@ -458,6 +458,135 @@ const Watermark = {
   },
 
   /**
+   * 从选区附近寻找一块同尺寸、边缘最匹配的真实背景。
+   * 复制真实纹理能避免 FMM 在大选区内不断平均后形成灰色矩形。
+   */
+  findSourcePatch(data, W, H, r) {
+    const { x, y, w, h } = r;
+    if (w < 2 || h < 2 || w > W * 0.65 || h > H * 0.65) return null;
+
+    const maxCandidates = 3200;
+    const radius = Math.max(96, Math.min(Math.max(w, h) * 3, Math.max(W, H)));
+    const minX = Math.max(0, x - radius), maxX = Math.min(W - w, x + radius);
+    const minY = Math.max(0, y - radius), maxY = Math.min(H - h, y + radius);
+    const area = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
+    const step = Math.max(1, Math.ceil(Math.sqrt(area / maxCandidates)));
+    const sampleStep = Math.max(1, Math.ceil((w + h) * 2 / 96));
+    const margin = 2;
+
+    const pixelError = (p1, p2) => {
+      const dr = data[p1] - data[p2];
+      const dg = data[p1 + 1] - data[p2 + 1];
+      const db = data[p1 + 2] - data[p2 + 2];
+      return dr * dr + dg * dg + db * db;
+    };
+
+    const overlapsSelection = (sx, sy) => !(
+      sx + w + margin <= x || sx >= x + w + margin ||
+      sy + h + margin <= y || sy >= y + h + margin
+    );
+
+    const scoreAt = (sx, sy) => {
+      if (sx < 0 || sy < 0 || sx + w > W || sy + h > H || overlapsSelection(sx, sy)) return null;
+      let error = 0, samples = 0;
+
+      if (y > 0) {
+        for (let i = 0; i < w; i += sampleStep) {
+          error += pixelError(((y - 1) * W + x + i) * 4, (sy * W + sx + i) * 4);
+          samples++;
+        }
+      }
+      if (y + h < H) {
+        for (let i = 0; i < w; i += sampleStep) {
+          error += pixelError(((y + h) * W + x + i) * 4, ((sy + h - 1) * W + sx + i) * 4);
+          samples++;
+        }
+      }
+      if (x > 0) {
+        for (let j = 0; j < h; j += sampleStep) {
+          error += pixelError(((y + j) * W + x - 1) * 4, ((sy + j) * W + sx) * 4);
+          samples++;
+        }
+      }
+      if (x + w < W) {
+        for (let j = 0; j < h; j += sampleStep) {
+          error += pixelError(((y + j) * W + x + w) * 4, ((sy + j) * W + sx + w - 1) * 4);
+          samples++;
+        }
+      }
+      if (!samples) return null;
+
+      const dx = sx - x, dy = sy - y;
+      const distancePenalty = (dx * dx + dy * dy) / Math.max(1, w * w + h * h) * 12;
+      return error / (samples * 3) + distancePenalty;
+    };
+
+    let best = null;
+    const consider = (sx, sy) => {
+      const score = scoreAt(sx, sy);
+      if (score !== null && (!best || score < best.score)) best = { sx, sy, score };
+    };
+
+    for (let sy = minY; sy <= maxY; sy += step) {
+      for (let sx = minX; sx <= maxX; sx += step) consider(sx, sy);
+    }
+    if (!best) return null;
+
+    // 粗搜后在最佳点附近逐像素细搜，避免跳步错过纹理相位。
+    const refine = Math.max(1, step);
+    for (let sy = Math.max(minY, best.sy - refine); sy <= Math.min(maxY, best.sy + refine); sy++) {
+      for (let sx = Math.max(minX, best.sx - refine); sx <= Math.min(maxX, best.sx + refine); sx++) consider(sx, sy);
+    }
+
+    // 边缘均方根误差过大表示附近没有可靠背景，交给保底算法。
+    return best && Math.sqrt(best.score) <= 72 ? best : null;
+  },
+
+  /** 复制真实背景块，并只在最外层做窄边融合。 */
+  applySourcePatch(src, data, W, H, r, patch) {
+    const { x, y, w, h } = r;
+    const { sx, sy } = patch;
+    const copied = new Uint8ClampedArray(w * h * 4);
+
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        const from = ((sy + j) * W + sx + i) * 4;
+        const to = (j * w + i) * 4;
+        copied[to] = src[from]; copied[to + 1] = src[from + 1];
+        copied[to + 2] = src[from + 2]; copied[to + 3] = 255;
+      }
+    }
+
+    const feather = Math.max(2, Math.min(6, Math.round(Math.min(w, h) * 0.08)));
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        const to = ((y + j) * W + x + i) * 4;
+        const from = (j * w + i) * 4;
+        const d = Math.min(i, w - 1 - i, j, h - 1 - j);
+        let alpha = 1;
+        let outside = -1;
+
+        if (d < feather) {
+          const t = (d + 1) / (feather + 1);
+          alpha = t * t * (3 - 2 * t);
+          let ox = x + i, oy = y + j;
+          if (i === d && x > 0) ox = x - 1;
+          else if (w - 1 - i === d && x + w < W) ox = x + w;
+          else if (j === d && y > 0) oy = y - 1;
+          else if (y + h < H) oy = y + h;
+          if (ox !== x + i || oy !== y + j) outside = (oy * W + ox) * 4;
+        }
+
+        for (let c = 0; c < 3; c++) {
+          const edge = outside >= 0 ? src[outside + c] : copied[from + c];
+          data[to + c] = Math.round(copied[from + c] * alpha + edge * (1 - alpha));
+        }
+        data[to + 3] = 255;
+      }
+    }
+  },
+
+  /**
    * 核心:Telea 快速行进算法(FMM) inpaint
    * 从选区边界向内传播已知像素,按梯度方向平滑填充
    * 直接操作结果画布(offCtx)
@@ -467,6 +596,13 @@ const Watermark = {
     const W = this.offCanvas.width, H = this.offCanvas.height;
     const src = this.offCtx.getImageData(0, 0, W, H);
     const data = src.data;
+    const sourcePatch = this.findSourcePatch(data, W, H, r);
+    if (sourcePatch) {
+      const original = new Uint8ClampedArray(data);
+      this.applySourcePatch(original, data, W, H, r, sourcePatch);
+      this.offCtx.putImageData(src, 0, 0);
+      return;
+    }
 
     // 边界外扩 8px,提升边界颜色连续性
     const pad = 8;
