@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 去水印模块
  * - 全程本地处理,不上传任何网络
  * - 1:1 原始分辨率输出,PNG 无损导出
@@ -26,7 +26,7 @@ const Watermark = {
   drawing: false,
   pointerId: null,
   _processing: false, // 防止处理中重复操作
-  MAX_PIXELS: 4096,   // 单边最长像素(超大图降采样处理,防 iPhone 卡死)
+  MAX_PIXELS: 2048,   // 单边最长像素(超大图降采样处理,兼容 iPhone canvas 面积限制)
 
   init() {
     this.canvas = document.getElementById('wmCanvas');
@@ -108,18 +108,24 @@ const Watermark = {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      URL.revokeObjectURL(url);
+      // iOS Safari 上过早 revoke blob URL 会导致后续 drawImage 失败,延迟释放
+      setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 5000);
       if (!img.naturalWidth || !img.naturalHeight) { Toast.show('图片读取失败'); return; }
+      clearTimeout(loadTimer);
       this.setImage(img);
       Toast.show('图片已载入,请框选水印区域');
     };
-    img.onerror = () => { URL.revokeObjectURL(url); Toast.show('图片读取失败,请换一张'); };
+    img.onerror = () => { clearTimeout(loadTimer); setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 1000); Toast.show('图片格式不支持,请选择 JPG/PNG 图片'); };
+    // 超时兜底:某些格式/超大图在 iOS 上解码慢或失败,给出明确提示
+    const loadTimer = setTimeout(() => {
+      if (!img.complete || !img.naturalWidth) { Toast.show('图片加载超时,可能格式不支持或图片过大'); }
+    }, 8000);
     img.src = url;
   },
 
   setImage(img) {
     this.image = img;
-    // 超大图:等比降采样到单边 ≤4096,否则 iPhone 内存会爆
+    // 超大图:等比降采样到单边 ≤2048,否则 iPhone 内存/画布面积会爆
     let w = img.naturalWidth, h = img.naturalHeight;
     const maxSide = this.MAX_PIXELS;
     if (w > maxSide || h > maxSide) {
@@ -130,6 +136,13 @@ const Watermark = {
     this.offCanvas.width = w;
     this.offCanvas.height = h;
     this.offCtx.drawImage(img, 0, 0, w, h);
+    // 安全校验:确认 offCanvas 确实画上了像素,避免 iOS 上静默失败后一片空白
+    try {
+      const probe = this.offCtx.getImageData(0, 0, 1, 1).data;
+      if (!probe || probe[3] === 0) { Toast.show('图片加载失败,请换一张试试'); return; }
+    } catch (e) {
+      Toast.show('图片过大,无法处理,请换一张较小的图片'); return;
+    }
     this.rects = [];
     this.selIndex = -1;
     this.history = [];
@@ -169,30 +182,33 @@ const Watermark = {
   },
 
   layoutCanvas() {
-    // 画布内部分辨率 = 图像原始分辨率
-    this.canvas.width = this.offCanvas.width;
-    this.canvas.height = this.offCanvas.height;
-    // 显示尺寸:按容器等比缩放,canvas CSS 尺寸精确 = 位图显示尺寸
+    // 显示尺寸:按容器等比缩放,canvas 内部分辨率 = 显示尺寸(节省内存,兼容 iOS canvas 面积限制)
     const wrap = document.querySelector('.wm-canvas-wrap');
     const boxW = (wrap && wrap.clientWidth) || (window.innerWidth - 28);
     const boxH = (wrap && wrap.clientHeight) || 380;
     this.dispScale = Math.min(boxW / this.offCanvas.width, boxH / this.offCanvas.height);
     const dw = Math.max(1, Math.round(this.offCanvas.width * this.dispScale));
     const dh = Math.max(1, Math.round(this.offCanvas.height * this.dispScale));
+    // 显示画布内部分辨率 = 显示尺寸(不再保留全尺寸,避免 iOS canvas 面积超限)
+    this.canvas.width = dw;
+    this.canvas.height = dh;
     // 容器内居中偏移(留白区域),坐标映射时使用
     this.dispOffsetX = Math.round((boxW - dw) / 2);
     this.dispOffsetY = Math.round((boxH - dh) / 2);
     // 关键:canvas CSS 尺寸 = 位图显示尺寸,flex 容器居中,不依赖 object-fit
     this.canvas.style.width = dw + 'px';
     this.canvas.style.height = dh + 'px';
+    this.redraw();
   },
 
   /** 屏幕坐标 -> 图像坐标 */
   toImageCoord(x, y) {
-    // canvas CSS 尺寸 = 位图显示尺寸,getBoundingClientRect 左上角即位图左上角
+    // canvas 内部分辨率 = 显示尺寸(dw),CSS 尺寸 = 显示尺寸,像素一一对应
     const r = this.canvas.getBoundingClientRect();
-    const ix = (x - r.left) / this.dispScale;
-    const iy = (y - r.top) / this.dispScale;
+    const dx = (x - r.left) * (this.canvas.width / r.width);
+    const dy = (y - r.top) * (this.canvas.height / r.height);
+    const ix = dx / this.dispScale;
+    const iy = dy / this.dispScale;
     return {
       x: Math.max(0, Math.min(this.offCanvas.width, ix)),
       y: Math.max(0, Math.min(this.offCanvas.height, iy)),
@@ -288,17 +304,18 @@ const Watermark = {
   redraw() {
     if (!this.image) return;
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    this.ctx.drawImage(this.offCanvas, 0, 0);
+    // offCanvas(全尺寸)缩放到显示画布尺寸
+    this.ctx.drawImage(this.offCanvas, 0, 0, this.offCanvas.width, this.offCanvas.height, 0, 0, this.canvas.width, this.canvas.height);
 
     // 选区标注
     this.rects.forEach((r, i) => {
       this.ctx.strokeStyle = '#3B82F6';
-      this.ctx.lineWidth = 2.5 / this.dispScale;
-      this.ctx.setLineDash([10 / this.dispScale, 6 / this.dispScale]);
-      this.ctx.strokeRect(r.x, r.y, r.w, r.h);
+      this.ctx.lineWidth = 2.5;
+      this.ctx.setLineDash([10, 6]);
+      this.ctx.strokeRect(r.x * this.dispScale, r.y * this.dispScale, r.w * this.dispScale, r.h * this.dispScale);
       if (i === this.selIndex) {
         this.ctx.fillStyle = 'rgba(59,130,246,0.14)';
-        this.ctx.fillRect(r.x, r.y, r.w, r.h);
+        this.ctx.fillRect(r.x * this.dispScale, r.y * this.dispScale, r.w * this.dispScale, r.h * this.dispScale);
       }
     });
     // 当前拖动框
@@ -306,11 +323,11 @@ const Watermark = {
       const { sx, sy, cx, cy } = this.dragging;
       const x = Math.min(sx, cx), y = Math.min(sy, cy);
       this.ctx.strokeStyle = '#F59E0B';
-      this.ctx.lineWidth = 2.5 / this.dispScale;
+      this.ctx.lineWidth = 2.5;
       this.ctx.setLineDash([]);
-      this.ctx.strokeRect(x, y, Math.abs(cx - sx), Math.abs(cy - sy));
+      this.ctx.strokeRect(x * this.dispScale, y * this.dispScale, Math.abs(cx - sx) * this.dispScale, Math.abs(cy - sy) * this.dispScale);
       this.ctx.fillStyle = 'rgba(245,158,11,0.12)';
-      this.ctx.fillRect(x, y, Math.abs(cx - sx), Math.abs(cy - sy));
+      this.ctx.fillRect(x * this.dispScale, y * this.dispScale, Math.abs(cx - sx) * this.dispScale, Math.abs(cy - sy) * this.dispScale);
     }
   },
 
