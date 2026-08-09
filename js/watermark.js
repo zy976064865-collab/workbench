@@ -574,7 +574,7 @@ const Watermark = {
       }
     }
 
-    const feather = Math.max(2, Math.min(6, Math.round(Math.min(w, h) * 0.08)));
+    const feather = Math.max(4, Math.min(10, Math.round(Math.min(w, h) * 0.1)));
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
         const to = ((y + j) * W + x + i) * 4;
@@ -604,15 +604,17 @@ const Watermark = {
   },
 
   /**
-   * 核心:Telea 快速行进算法(FMM) inpaint
-   * 从选区边界向内传播已知像素,按梯度方向平滑填充
-   * 直接操作结果画布(offCtx)
+   * 从选区四方向边界加权插值填充(保持背景渐变,不产生矩形边框/色块)。
+   * 对每个待修复像素,取选区外上/下/左/右最近的 1px 真实背景,按距离倒数平方加权合成。
+   * 返回 false 表示边界样本太少(选区几乎占满画面),交由 FMM 兜底。
    */
+  /** 智能修复入口:patch 纹理复制 -> 边界插值 -> FMM 兜底 */
   inpaintRect(r) {
     const { x, y, w, h } = r;
     const W = this.offCanvas.width, H = this.offCanvas.height;
     const src = this.offCtx.getImageData(0, 0, W, H);
     const data = src.data;
+    // ① 优先复制选区附近相似的真实纹理块(保真度最高)
     const sourcePatch = this.findSourcePatch(data, W, H, r);
     if (sourcePatch) {
       const original = new Uint8ClampedArray(data);
@@ -620,6 +622,87 @@ const Watermark = {
       this.offCtx.putImageData(src, 0, 0);
       return;
     }
+    // ② 四方向边界加权插值(保持背景渐变,不产生矩形边框/阴影)
+    if (this.fillByBoundary(src.data, data, W, H, r)) {
+      this.offCtx.putImageData(src, 0, 0);
+      return;
+    }
+    // ③ FMM 兜底(仅当选区几乎占满画面、边界样本不足时触发)
+    this.inpaintRectFMM(r);
+  },
+
+  fillByBoundary(src, data, W, H, r) {
+    const { x, y, w, h } = r;
+    const pre = new Float32Array(w * h * 3);
+    let ok = 0;
+    for (let j = 0; j < h; j++) {
+      const cy = y + j;
+      const dTop = y > 0 ? cy - (y - 1) : -1;
+      const dBot = y + h < H ? (y + h) - cy : -1;
+      for (let i = 0; i < w; i++) {
+        const cx = x + i;
+        const dLef = x > 0 ? cx - (x - 1) : -1;
+        const dRig = x + w < W ? (x + w) - cx : -1;
+        let rv = 0, gv = 0, bv = 0, ws = 0;
+        const add = (px, ww) => { rv += src[px] * ww; gv += src[px + 1] * ww; bv += src[px + 2] * ww; ws += ww; };
+        if (dTop >= 0) add(((y - 1) * W + cx) * 4, 1 / (dTop * dTop));
+        if (dBot >= 0) add(((y + h) * W + cx) * 4, 1 / (dBot * dBot));
+        if (dLef >= 0) add((cy * W + (x - 1)) * 4, 1 / (dLef * dLef));
+        if (dRig >= 0) add((cy * W + (x + w)) * 4, 1 / (dRig * dRig));
+        if (ws > 0) {
+          const q = (j * w + i) * 3;
+          pre[q] = rv / ws; pre[q + 1] = gv / ws; pre[q + 2] = bv / ws;
+          ok++;
+        }
+      }
+    }
+    if (ok < 10) return false; // 边界样本太少,走 FMM 兜底
+
+    // 写入 + 边缘羽化(与选区外最近真实像素在过渡带混合,消除接缝)
+    const feather = 2;
+    for (let j = 0; j < h; j++) {
+      const cy = y + j;
+      for (let i = 0; i < w; i++) {
+        const cx = x + i;
+        const dEdge = Math.min(i, w - 1 - i, j, h - 1 - j);
+        let t = 1;
+        if (dEdge < feather) t = (dEdge + 1) / (feather + 1);
+        t = t * t * (3 - 2 * t);
+        const q = (j * w + i) * 3;
+        let rv = pre[q], gv = pre[q + 1], bv = pre[q + 2];
+        if (t < 1) {
+          let bestD = 1e9, br = 0, bg = 0, bb = 0;
+          const cand = [
+            y > 0 ? [((y - 1) * W + cx) * 4, cy - (y - 1)] : null,
+            y + h < H ? [((y + h) * W + cx) * 4, (y + h) - cy] : null,
+            x > 0 ? [(cy * W + (x - 1)) * 4, cx - (x - 1)] : null,
+            x + w < W ? [(cy * W + (x + w)) * 4, (x + w) - cx] : null,
+          ];
+          for (const c of cand) {
+            if (c && c[1] < bestD) {
+              bestD = c[1]; br = src[c[0]]; bg = src[c[0] + 1]; bb = src[c[0] + 2];
+            }
+          }
+          rv = rv * t + br * (1 - t);
+          gv = gv * t + bg * (1 - t);
+          bv = bv * t + bb * (1 - t);
+        }
+        const to = (cy * W + cx) * 4;
+        data[to] = Math.round(rv);
+        data[to + 1] = Math.round(gv);
+        data[to + 2] = Math.round(bv);
+        data[to + 3] = 255;
+      }
+    }
+    return true;
+  },
+
+  /** 兜底:Telea FMM(仅当选区几乎占满画面、边界样本不足时触发) */
+  inpaintRectFMM(r) {
+    const { x, y, w, h } = r;
+    const W = this.offCanvas.width, H = this.offCanvas.height;
+    const src = this.offCtx.getImageData(0, 0, W, H);
+    const data = src.data;
 
     // 边界外扩 8px,提升边界颜色连续性
     const pad = 8;
@@ -871,7 +954,10 @@ const Watermark = {
     }
 
     this.offCtx.putImageData(src, 0, 0);
+  
   },
+
+
   /**
    * 高斯模糊选区(分块异步执行,避免大图卡死)
    * 用 1/4 分辨率中间层做快速高斯近似,兼顾速度与效果
