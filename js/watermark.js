@@ -478,64 +478,75 @@ const Watermark = {
    * 从选区附近寻找一块同尺寸、边缘最匹配的真实背景。
    * 复制真实纹理能避免 FMM 在大选区内不断平均后形成灰色矩形。
    */
+  /**
+   * 从选区附近寻找一块同尺寸、边缘最匹配的真实背景块。
+   * 策略:比较选区四边外侧 3px 边缘带的平均色与候选块对应边缘带,
+   * 抗噪能力强(真实照片噪声大时也能稳定匹配),再用距离惩罚选最近者。
+   * 找到后复制真实纹理填充,避免背景被抹平成色块。
+   */
   findSourcePatch(data, W, H, r) {
     const { x, y, w, h } = r;
-    if (w < 2 || h < 2 || w > W * 0.65 || h > H * 0.65) return null;
+    if (w < 2 || h < 2 || w > W * 0.7 || h > H * 0.7) return null;
 
-    const maxCandidates = 3200;
-    const radius = Math.max(96, Math.min(Math.max(w, h) * 3, Math.max(W, H)));
+    const maxCandidates = 6000;
+    const radius = Math.max(160, Math.min(Math.max(w, h) * 5, Math.max(W, H)));
     const minX = Math.max(0, x - radius), maxX = Math.min(W - w, x + radius);
     const minY = Math.max(0, y - radius), maxY = Math.min(H - h, y + radius);
     const area = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
     const step = Math.max(1, Math.ceil(Math.sqrt(area / maxCandidates)));
-    const sampleStep = Math.max(1, Math.ceil((w + h) * 2 / 96));
-    const margin = 2;
+    const E = 3; // 边缘带宽度(px)
 
-    const pixelError = (p1, p2) => {
-      const dr = data[p1] - data[p2];
-      const dg = data[p1 + 1] - data[p2 + 1];
-      const db = data[p1 + 2] - data[p2 + 2];
-      return dr * dr + dg * dg + db * db;
+    // 计算一条边缘带(3px 厚)的平均 RGB
+    const edgeAvg = (x0, y0, dx, dy, len) => {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let k = 0; k < len; k += 2) {
+        for (let d = 1; d <= E; d++) {
+          const ex = x0 + dx * k + (dx !== 0 ? dx * d : 0);
+          const ey = y0 + dy * k + (dy !== 0 ? dy * d : 0);
+          if (ex < 0 || ey < 0 || ex >= W || ey >= H) continue;
+          const p = (ey * W + ex) * 4;
+          r += data[p]; g += data[p + 1]; b += data[p + 2]; n++;
+        }
+      }
+      return n ? [r / n, g / n, b / n] : null;
     };
 
+    // 选区四条边缘带(基准)
+    const baseBands = [
+      y > 0 ? edgeAvg(x, y - 1, 1, 0, w) : null,          // top
+      y + h < H ? edgeAvg(x, y + h, 1, 0, w) : null,      // bottom
+      x > 0 ? edgeAvg(x - 1, y, 0, 1, h) : null,          // left
+      x + w < W ? edgeAvg(x + w, y, 0, 1, h) : null,      // right
+    ];
+    if (!baseBands[0] && !baseBands[1] && !baseBands[2] && !baseBands[3]) return null;
+
     const overlapsSelection = (sx, sy) => !(
-      sx + w + margin <= x || sx >= x + w + margin ||
-      sy + h + margin <= y || sy >= y + h + margin
+      sx + w + E <= x || sx >= x + w + E || sy + h + E <= y || sy >= y + h + E
     );
 
+    // 候选块与选区的四边边缘带相似度
     const scoreAt = (sx, sy) => {
       if (sx < 0 || sy < 0 || sx + w > W || sy + h > H || overlapsSelection(sx, sy)) return null;
-      let error = 0, samples = 0;
-
-      if (y > 0) {
-        for (let i = 0; i < w; i += sampleStep) {
-          error += pixelError(((y - 1) * W + x + i) * 4, (sy * W + sx + i) * 4);
-          samples++;
+      const cb = [
+        sy > 0 ? edgeAvg(sx, sy - 1, 1, 0, w) : null,
+        sy + h < H ? edgeAvg(sx, sy + h, 1, 0, w) : null,
+        sx > 0 ? edgeAvg(sx - 1, sy, 0, 1, h) : null,
+        sx + w < W ? edgeAvg(sx + w, sy, 0, 1, h) : null,
+      ];
+      let err = 0, n = 0;
+      for (let i = 0; i < 4; i++) {
+        if (baseBands[i] && cb[i]) {
+          const dr = baseBands[i][0] - cb[i][0];
+          const dg = baseBands[i][1] - cb[i][1];
+          const db = baseBands[i][2] - cb[i][2];
+          err += (dr * dr + dg * dg + db * db) / 3;
+          n++;
         }
       }
-      if (y + h < H) {
-        for (let i = 0; i < w; i += sampleStep) {
-          error += pixelError(((y + h) * W + x + i) * 4, ((sy + h - 1) * W + sx + i) * 4);
-          samples++;
-        }
-      }
-      if (x > 0) {
-        for (let j = 0; j < h; j += sampleStep) {
-          error += pixelError(((y + j) * W + x - 1) * 4, ((sy + j) * W + sx) * 4);
-          samples++;
-        }
-      }
-      if (x + w < W) {
-        for (let j = 0; j < h; j += sampleStep) {
-          error += pixelError(((y + j) * W + x + w) * 4, ((sy + j) * W + sx + w - 1) * 4);
-          samples++;
-        }
-      }
-      if (!samples) return null;
-
+      if (!n) return null;
       const dx = sx - x, dy = sy - y;
-      const distancePenalty = (dx * dx + dy * dy) / Math.max(1, w * w + h * h) * 12;
-      return error / (samples * 3) + distancePenalty;
+      const distancePenalty = (dx * dx + dy * dy) / Math.max(1, w * w + h * h) * 6;
+      return err / n + distancePenalty;
     };
 
     let best = null;
@@ -543,23 +554,18 @@ const Watermark = {
       const score = scoreAt(sx, sy);
       if (score !== null && (!best || score < best.score)) best = { sx, sy, score };
     };
-
     for (let sy = minY; sy <= maxY; sy += step) {
       for (let sx = minX; sx <= maxX; sx += step) consider(sx, sy);
     }
     if (!best) return null;
-
-    // 粗搜后在最佳点附近逐像素细搜，避免跳步错过纹理相位。
+    // 细搜
     const refine = Math.max(1, step);
     for (let sy = Math.max(minY, best.sy - refine); sy <= Math.min(maxY, best.sy + refine); sy++) {
       for (let sx = Math.max(minX, best.sx - refine); sx <= Math.min(maxX, best.sx + refine); sx++) consider(sx, sy);
     }
-
-    // 边缘均方根误差过大表示附近没有可靠背景，交给保底算法。
-    return best && Math.sqrt(best.score) <= 72 ? best : null;
+    return best && Math.sqrt(best.score) <= 100 ? best : null;
   },
 
-  /** 复制真实背景块，并只在最外层做窄边融合。 */
   applySourcePatch(src, data, W, H, r, patch) {
     const { x, y, w, h } = r;
     const { sx, sy } = patch;
